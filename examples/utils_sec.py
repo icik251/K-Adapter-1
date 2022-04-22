@@ -124,7 +124,7 @@ class SECProcessor(DataProcessor):
                 # label = [0 for item in range(len(label_list))]
                 # for item in line['labels']:
                 #     label[label_list.index(item)] = 1
-                label = curr_dict_input['percentage_change']
+                label = curr_dict_input['percentage_change_standard']
 
                 examples.append(
                     InputExample(guid=guid, text_a=text_a, label=label))

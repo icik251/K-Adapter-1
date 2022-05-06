@@ -62,6 +62,7 @@ class RNNModel(nn.Module):
         self.lstm = nn.LSTM(
             self.input_size, self.hidden_size, self.num_layers, batch_first=True
         )
+        self.dropout = nn.Dropout(args.rnn_dropout_prob)
         self.fc = nn.Linear(self.hidden_size, self.num_classes)
 
     def forward(self, x):
@@ -79,7 +80,7 @@ class RNNModel(nn.Module):
         )  # out: tensor of shape (batch_size, seq_length, hidden_size)
 
         # Decode the hidden state of the last time step
-        out = self.fc(out[:, -1, :])
+        out = self.fc(self.dropout(out[:, -1, :]))
         return out
 
 
@@ -102,9 +103,6 @@ class PretrainedModel(nn.Module):
         self.model = BertModel.from_pretrained(
             pretrained_model_name_or_path=args.finbert_path, output_hidden_states=True
         )
-        # self.model2 = BertModel.from_pretrained(
-        #     cls=args.finbert_config, pretrained_model_name_or_path=args.finbert_path, output_hidden_states=True
-        # )
         self.config = self.model.config
         self.config.freeze_adapter = args.freeze_adapter
         if args.freeze_bert:
@@ -144,14 +142,6 @@ class AdapterEnsembleModel(nn.Module):
         if args.freeze_adapter and (self.sec_adapter is not None):
             for p in self.sec_adapter.parameters():
                 p.requires_grad = False
-
-        # self.adapter_num = 0
-        # if self.sec_adapter is not None:
-        #     self.adapter_num += 1
-        # if self.et_adapter is not None:
-        #     self.adapter_num += 1
-        # if self.lin_adapter is not None:
-        #     self.adapter_num += 1
 
         if self.args.fusion_mode == "concat":
             # self.task_dense_lin = nn.Linear(self.config.hidden_size + self.config.hidden_size, self.config.hidden_size)
@@ -262,14 +252,14 @@ def load_and_cache_examples(args, task, tokenizer, dataset_type, evaluate=False)
         features = torch.load(cached_features_file)
     else:
         logger.info("Creating features from dataset file at %s", args.data_dir)
-        label_list = processor.get_labels()
-        if task in ["mnli", "mnli-mm"] and args.model_type in ["roberta"]:
-            # HACK(label indices are swapped in RoBERTa pretrained model)
-            label_list[1], label_list[2] = label_list[2], label_list[1]
         examples = (
-            processor.get_dev_examples(args.data_dir, dataset_type)
+            processor.get_dev_examples(
+                args.data_dir, args.percentage_change_type, dataset_type
+            )
             if evaluate
-            else processor.get_train_examples(args.data_dir, dataset_type)
+            else processor.get_train_examples(
+                args.data_dir, args.percentage_change_type, dataset_type
+            )
         )
         features = convert_examples_to_features_sec(
             examples,
@@ -323,7 +313,7 @@ def load_and_cache_examples(args, task, tokenizer, dataset_type, evaluate=False)
     #     all_input_ids, all_input_mask, all_segment_ids, all_label_ids
     # )
 
-    dataset = SECDataset(features, all_label_ids)
+    dataset = SECDataset(features, all_label_ids, args.max_seq_length)
 
     return dataset
 
@@ -369,56 +359,99 @@ def train(args, train_dataset, model, tokenizer):
         Optimizer and Scheduler for BERT models
     """
     no_decay = ["bias", "LayerNorm.weight"]
-    # This freezes the pretrained BERT
-    if args.freeze_bert:
-        optimizer_grouped_parameters = [
-            # Adapter Ensemble Bert model parameters
-            {
-                "params": [
-                    p
-                    for n, p in adapter_ensemble_model.named_parameters()
-                    if not any(nd in n for nd in no_decay)
-                ],
-                "weight_decay": args.weight_decay,
-            },
-            {
-                "params": [
-                    p
-                    for n, p in adapter_ensemble_model.named_parameters()
-                    if any(nd in n for nd in no_decay)
-                ],
-                "weight_decay": 0.0,
-            },
-            # RNN Model parameters
-            {
-                "params": [
-                    p
-                    for n, p in rnn_model.named_parameters()
-                    if not any(nd in n for nd in no_decay)
-                ],
-                "weight_decay": args.weight_decay,
-            },
-            {
-                "params": [
-                    p
-                    for n, p in rnn_model.named_parameters()
-                    if any(nd in n for nd in no_decay)
-                ],
-                "weight_decay": 0.0,
-            },
-        ]
-    # else:
+    # This lets us combine parameters which we want to change using the optimizer. Can be from couple of models
+    # Use these grouped parameters only if we want to touch the BERT weights as well
+    # if args.freeze_bert:
     #     optimizer_grouped_parameters = [
-    #         {'params': [p for n, p in adapter_ensemble_model.named_parameters() if not any(nd in n for nd in no_decay)],
-    #          'weight_decay': args.weight_decay},
-    #         {'params': [p for n, p in adapter_ensemble_model.named_parameters() if any(nd in n for nd in no_decay)],
-    #          'weight_decay': 0.0},
-    #         {'params': [p for n, p in pretrained_finbert_model.named_parameters() if not any(nd in n for nd in no_decay)],
-    #          'weight_decay': args.weight_decay},
-    #         {'params': [p for n, p in pretrained_finbert_model.named_parameters() if any(nd in n for nd in no_decay)],
-    #          'weight_decay': 0.0}
+    #         # Adapter Ensemble Bert model parameters
+    #         {
+    #             "params": [
+    #                 p
+    #                 for n, p in adapter_ensemble_model.named_parameters()
+    #                 if not any(nd in n for nd in no_decay)
+    #             ],
+    #             "weight_decay": args.weight_decay,
+    #         },
+    #         {
+    #             "params": [
+    #                 p
+    #                 for n, p in adapter_ensemble_model.named_parameters()
+    #                 if any(nd in n for nd in no_decay)
+    #             ],
+    #             "weight_decay": 0.0,
+    #         },
+    #         # RNN Model parameters
+    #         {
+    #             "params": [
+    #                 p
+    #                 for n, p in rnn_model.named_parameters()
+    #                 if not any(nd in n for nd in no_decay)
+    #             ],
+    #             "weight_decay": args.weight_decay,
+    #         },
+    #         {
+    #             "params": [
+    #                 p
+    #                 for n, p in rnn_model.named_parameters()
+    #                 if any(nd in n for nd in no_decay)
+    #             ],
+    #             "weight_decay": 0.0,
+    #         },
     #     ]
+    # else:
+    # optimizer_grouped_parameters = [
+    #     {
+    #         "params": [
+    #             p
+    #             for n, p in adapter_ensemble_model.named_parameters()
+    #             if not any(nd in n for nd in no_decay)
+    #         ],
+    #         "weight_decay": args.weight_decay,
+    #     },
+    #     {
+    #         "params": [
+    #             p
+    #             for n, p in adapter_ensemble_model.named_parameters()
+    #             if any(nd in n for nd in no_decay)
+    #         ],
+    #         "weight_decay": 0.0,
+    #     },
+    #     {
+    #         "params": [
+    #             p
+    #             for n, p in pretrained_finbert_model.named_parameters()
+    #             if not any(nd in n for nd in no_decay)
+    #         ],
+    #         "weight_decay": args.weight_decay,
+    #     },
+    #     {
+    #         "params": [
+    #             p
+    #             for n, p in pretrained_finbert_model.named_parameters()
+    #             if any(nd in n for nd in no_decay)
+    #         ],
+    #         "weight_decay": 0.0,
+    #     },
+    #     {
+    #         "params": [
+    #             p
+    #             for n, p in rnn_model.named_parameters()
+    #             if not any(nd in n for nd in no_decay)
+    #         ],
+    #         "weight_decay": args.weight_decay,
+    #     },
+    #     {
+    #         "params": [
+    #             p
+    #             for n, p in rnn_model.named_parameters()
+    #             if any(nd in n for nd in no_decay)
+    #         ],
+    #         "weight_decay": 0.0,
+    #     },
+    # ]
 
+    # Comment out if using the real grouped parameters
+    optimizer_grouped_parameters = rnn_model.parameters()
     optimizer = AdamW(
         optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon
     )
@@ -479,38 +512,35 @@ def train(args, train_dataset, model, tokenizer):
     )
     set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
     loss_fct = MSELoss()
-    for _ in train_iterator:
+    for curr_iter in train_iterator:
+        print(curr_iter)
         epoch_iterator = tqdm(
             train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0]
         )
         for step, batch in enumerate(epoch_iterator):
-            if args.freeze_bert:
-                pretrained_finbert_model.eval()
-            else:
-                pretrained_finbert_model.train()
-            adapter_ensemble_model.train()
+            # if args.freeze_bert:
+            #     pretrained_finbert_model.eval()
+            # else:
+            #     pretrained_finbert_model.train()
+            # adapter_ensemble_model.train()
             rnn_model.train()
 
             curr_batch_input_ids = defaultdict(list)
             curr_batch_input_masks = defaultdict(list)
             curr_batch_segment_ids = defaultdict(list)
-            list_indexes_to_get = list(range(args.train_batch_size))
-            for item in batch[0]:
-                for idx in list_indexes_to_get:
-                    curr_batch_input_ids[idx].append(
-                        item["input_ids"][idx].to(args.device)
-                    )
+        
+            # Organize the input data for the whole batch in a better way
+            for item_paragraph in batch[0]:
+                for idx in range(item_paragraph["input_ids"].shape[0]):
+                    curr_batch_input_ids[idx].append(item_paragraph["input_ids"][idx])
                     curr_batch_input_masks[idx].append(
-                        item["input_mask"][idx].to(args.device)
+                        item_paragraph["input_mask"][idx]
                     )
-                    curr_batch_segment_ids[idx].append(
-                        item["segment_ids"][idx].to(args.device)
-                    )
+                    curr_batch_segment_ids[idx].append(item_paragraph["segment_ids"][idx])
 
             curr_batch_outputs_from_rnn = []
-
-            # Process curr filing from the batch
-            for my_batch in list_indexes_to_get:
+            # Process curr batch of filings from the batch
+            for my_batch in range(len(curr_batch_input_ids)):
                 curr_filing_input_ids = curr_batch_input_ids[my_batch]
                 curr_filing_input_masks = curr_batch_input_masks[my_batch]
                 curr_filing_segment_ids = curr_batch_segment_ids[my_batch]
@@ -531,9 +561,9 @@ def train(args, train_dataset, model, tokenizer):
 
                     # batch = tuple(t.to(args.device) for t in batch)
                     input_curr_paragraph = {
-                        "input_ids": input_ids[None, :],
-                        "attention_mask": input_masks[None, :],
-                        "token_type_ids": segment_ids[None, :]
+                        "input_ids": input_ids[None, :].to(args.device),
+                        "attention_mask": input_masks[None, :].to(args.device),
+                        "token_type_ids": segment_ids[None, :].to(args.device),
                         # if args.model_type in ["bert", "xlnet"]
                         # else None,  # XLM and RoBERTa don't use segment_ids
                         # "labels": batch[1][curr_idx_to_get],
@@ -552,8 +582,12 @@ def train(args, train_dataset, model, tokenizer):
                 """
 
                 # Convert list to tensor
-                curr_filing_encoded_paragraphs = torch.stack(curr_filing_encoded_paragraphs)
-                curr_filing_encoded_paragraphs = curr_filing_encoded_paragraphs.unsqueeze(0).to(args.device)
+                curr_filing_encoded_paragraphs = torch.stack(
+                    curr_filing_encoded_paragraphs
+                )
+                curr_filing_encoded_paragraphs = (
+                    curr_filing_encoded_paragraphs.unsqueeze(0).to(args.device)
+                )
 
                 rnn_output_for_filing = rnn_model(curr_filing_encoded_paragraphs)
                 curr_batch_outputs_from_rnn.append(rnn_output_for_filing)
@@ -562,7 +596,7 @@ def train(args, train_dataset, model, tokenizer):
             curr_batch_outputs_from_rnn = torch.stack(curr_batch_outputs_from_rnn)
             curr_batch_outputs_from_rnn = curr_batch_outputs_from_rnn.squeeze(1)
             curr_batch_labels = batch[1].to(args.device).unsqueeze(1)
-            
+
             loss = loss_fct(curr_batch_outputs_from_rnn, curr_batch_labels)
             epoch_iterator.set_description("loss {}".format(loss))
 
@@ -572,13 +606,15 @@ def train(args, train_dataset, model, tokenizer):
             #     torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
             # else:
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                pretrained_finbert_model.parameters(), args.max_grad_norm
-            )
-            torch.nn.utils.clip_grad_norm_(
-                adapter_ensemble_model.parameters(), args.max_grad_norm
-            )
-            torch.nn.utils.clip_grad_norm_(rnn_model.parameters(), args.max_grad_norm)
+
+            """Clipping gradients"""
+            # torch.nn.utils.clip_grad_norm_(
+            #     pretrained_finbert_model.parameters(), args.max_grad_norm
+            # )
+            # torch.nn.utils.clip_grad_norm_(
+            #     adapter_ensemble_model.parameters(), args.max_grad_norm
+            # )
+            # torch.nn.utils.clip_grad_norm_(rnn_model.parameters(), args.max_grad_norm)
 
             tr_loss += loss.item()
             if (step + 1) % args.gradient_accumulation_steps == 0:
@@ -586,7 +622,7 @@ def train(args, train_dataset, model, tokenizer):
                 scheduler.step()  # Update learning rate schedule
 
                 # model.zero_grad()
-                pretrained_finbert_model.zero_grad()
+                # pretrained_finbert_model.zero_grad()
                 adapter_ensemble_model.zero_grad()
                 rnn_model.zero_grad()
                 global_step += 1
@@ -802,6 +838,13 @@ def main():
         help="The output directory where the model predictions and checkpoints will be written.",
     )
     parser.add_argument(
+        "--percentage_change_type",
+        default="percentage_change",
+        type=str,
+        required=True,
+        help="The percentage change type for the label. Can be: percentage_change, percentage_change_standard, percentage_change_min_max",
+    )
+    parser.add_argument(
         "--freeze_bert",
         default=True,
         type=bool,
@@ -836,6 +879,12 @@ def main():
         default=1,
         type=int,
         help="Output for the regression task for RNN.",
+    )
+    parser.add_argument(
+        "--rnn_dropout_prob",
+        default=0.2,
+        type=float,
+        help="Dropout prob before the Dense layer in the RNN.",
     )
     parser.add_argument(
         "--kpi_input_size",
@@ -965,7 +1014,7 @@ def main():
         help="The initial learning rate for Adam.",
     )
     parser.add_argument(
-        "--weight_decay", default=0.0, type=float, help="Weight deay if we apply some."
+        "--weight_decay", default=0.0, type=float, help="Weight decay if we apply some."
     )
     parser.add_argument(
         "--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer."
@@ -1049,21 +1098,7 @@ def main():
     args.adapter_list = args.adapter_list.split(",")
     args.adapter_list = [int(i) for i in args.adapter_list]
 
-    name_prefix = (
-        "batch-"
-        + str(args.train_batch_size)
-        + "_"
-        + "lr-"
-        + str(args.learning_rate)
-        + "_"
-        + "warmup-"
-        + str(args.warmup_steps)
-        + "_"
-        + "epoch-"
-        + str(args.num_train_epochs)
-        + "_"
-        + str(args.comment)
-    )
+    name_prefix = f"{list(filter(None, args.finbert_path.split('/'))).pop()}_{args.percentage_change_type}_kfold-{args.data_dir.split('_')[-1]}_max_seq-{args.max_seq_length}_rnn_num_layers-{args.rnn_num_layers}_rnn_hidden_size-{args.rnn_hidden_size}_batch-{args.train_batch_size}_lr-{args.learning_rate}_warmup-{args.warmup_steps}_epoch-{args.num_train_epochs}_comment-{args.comment}"
     args.my_model_name = args.task_name + "_" + name_prefix
     args.output_dir = os.path.join(args.output_dir, args.my_model_name)
 
@@ -1100,10 +1135,13 @@ def main():
     # Set seed
     set_seed(args)
 
-    tokenizer_hugging = BertTokenizerHugging.from_pretrained(
-        "yiyanghkust/finbert-tone", model_max_length=args.max_seq_length
-    )
-    tokenizer_local = BertTokenizerLocal.from_pretrained("bert")
+    # Choose tokenizer for BERT or FinBERT
+    if list(filter(None, args.finbert_path.split("/"))).pop() == "bert-base-uncased":
+        tokenizer = BertTokenizerLocal.from_pretrained("bert-base-uncased")
+    elif list(filter(None, args.finbert_path.split("/"))).pop() == "FinBERT":
+        tokenizer = BertTokenizerHugging.from_pretrained(
+            "yiyanghkust/finbert-tone", model_max_length=args.max_seq_length
+        )
     pretrained_model = PretrainedModel(args)
     if args.meta_sec_adaptermodel:
         sec_adapter = AdapterModel(args, pretrained_model.config)
@@ -1156,10 +1194,12 @@ def main():
     # Training
     if args.do_train:
         train_dataset = load_and_cache_examples(
-            args, args.task_name, tokenizer_hugging, "train", evaluate=False
+            args, args.task_name, tokenizer, "train", evaluate=False
         )
+        # print("Features created!")
+        # return
         global_step, tr_loss = train(
-            args, train_dataset, full_ensemble_model, tokenizer_hugging
+            args, train_dataset, full_ensemble_model, tokenizer
         )
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 

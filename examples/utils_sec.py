@@ -115,43 +115,52 @@ class DataProcessor(object):
 class SECProcessor(DataProcessor):
     """Processor for our SEC filings data"""
 
-    def get_train_examples(self, data_dir, dataset_type=None):
+    def get_train_examples(self, data_dir, percentage_change_type, dataset_type=None):
         """See base class."""
         return self._create_examples(
-            self._read_json(os.path.join(data_dir, "train.json")), "train"
+            self._read_json(os.path.join(data_dir, "train.json")), percentage_change_type
         )
 
-    def get_dev_examples(self, data_dir, dataset_type):
+    def get_dev_examples(self, data_dir, percentage_change_type, dataset_type):
         """See base class."""
         return self._create_examples(
             self._read_json(os.path.join(data_dir, "{}.json".format(dataset_type))),
-            dataset_type,
+            percentage_change_type,
         )
 
     def get_labels(self):
         """See base class."""
         return 0
 
-    def _create_examples(self, list_of_dicts, set_type):
+    def _create_examples(self, list_of_dicts, percentage_change_type):
         """Creates examples for the training and dev sets."""
         examples = []
         for (i, curr_dict_input) in enumerate(list_of_dicts):
-            if "risk_paragraphs" not in curr_dict_input.keys():
+            if "mda_paragraphs" not in curr_dict_input.keys():
+                print(
+                    f"MDA missing {i} | {curr_dict_input[percentage_change_type]}"
+                )
                 continue
 
             list_input_examples_paragraphs = []
-            for k, mda_paragraph in curr_dict_input["risk_paragraphs"].items():
+            for k, mda_paragraph in curr_dict_input["mda_paragraphs"].items():
                 text_a = mda_paragraph
                 curr_paragraph_per_filing = InputExampleParagraph(text_a=text_a)
                 list_input_examples_paragraphs.append(curr_paragraph_per_filing)
             guid = i
-            label = curr_dict_input["percentage_change_standard"]
+            label = curr_dict_input[percentage_change_type]
 
             if list_input_examples_paragraphs:
                 examples.append(
                     InputExampleFiling(guid, list_input_examples_paragraphs, label)
                 )
+            else:
+                print(f"Absolutely empty filing: {i} | {label}")
 
+            # For testing
+            if i >= 100:
+                break
+            
         return examples
 
 
@@ -179,7 +188,7 @@ def convert_examples_to_features_sec(
     # check if pad_token_segment_id should be 0
     features = []
     for (ex_index, filing_example) in enumerate(examples):
-        if ex_index % 10000 == 0:
+        if ex_index % 1000 == 0:
             logger.info("Writing example %d of %d" % (ex_index, len(examples)))
 
         list_input_features_paragraphs = []
@@ -247,14 +256,14 @@ def convert_examples_to_features_sec(
         features.append(InputFeaturesFiling(list_input_features_paragraphs, label_id))
 
         # Only for testing purposes
-        if len(features) >= 1000:
-            break
+        # if len(features) >= 1000:
+        #     break
 
     return features
 
 
 class SECDataset(Dataset):
-    def __init__(self, filings_features, labels_ids):
+    def __init__(self, filings_features, labels_ids, max_seq_length):
 
         self.filings_features = []
         longest_list_paragraphs = 0
@@ -276,7 +285,7 @@ class SECDataset(Dataset):
 
         for idx_for_pad, (list_of_paragraphs, _) in enumerate(self.filings_features):
             num_to_pad = longest_list_paragraphs - len(list_of_paragraphs)
-            tensor_to_pad = torch.zeros(512, dtype=torch.long)
+            tensor_to_pad = torch.zeros(max_seq_length, dtype=torch.long)
             self.filings_features[idx_for_pad][0] = (
                 list_of_paragraphs
                 + [

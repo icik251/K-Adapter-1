@@ -82,6 +82,17 @@ class RNNModel(nn.Module):
         # Decode the hidden state of the last time step
         out = self.fc(self.dropout(out[:, -1, :]))
         return out
+    
+    def save_pretrained(self, save_directory):
+        assert os.path.isdir(
+            save_directory
+        ), "Saving path should be a directory where the model can be saved"
+        # Only save the model it-self if we are using distributed training
+        model_to_save = self.module if hasattr(self, "module") else self
+        # If we save using the predefined names, we can load using `from_pretrained`
+        output_model_file = os.path.join(save_directory, "rnn_pytorch_model.bin")
+        torch.save(model_to_save.state_dict(), output_model_file)
+        logger.info("Saving model checkpoint to %s", save_directory)
 
 
 class KPIModel(nn.Module):
@@ -95,6 +106,17 @@ class KPIModel(nn.Module):
     def forward(self, x):
         out = self.fc(x)
         return out
+    
+    def save_pretrained(self, save_directory):
+        assert os.path.isdir(
+            save_directory
+        ), "Saving path should be a directory where the model can be saved"
+        # Only save the model it-self if we are using distributed training
+        model_to_save = self.module if hasattr(self, "module") else self
+        # If we save using the predefined names, we can load using `from_pretrained`
+        output_model_file = os.path.join(save_directory, "kpi_pytorch_model.bin")
+        torch.save(model_to_save.state_dict(), output_model_file)
+        logger.info("Saving model checkpoint to %s", save_directory)
 
 
 class PretrainedModel(nn.Module):
@@ -223,7 +245,7 @@ class AdapterEnsembleModel(nn.Module):
         # Save configuration file
         model_to_save.config.save_pretrained(save_directory)
         # If we save using the predefined names, we can load using `from_pretrained`
-        output_model_file = os.path.join(save_directory, "pytorch_model.bin")
+        output_model_file = os.path.join(save_directory, "adapter_ensemble_pytorch_model.bin")
         torch.save(model_to_save.state_dict(), output_model_file)
         logger.info("Saving model checkpoint to %s", save_directory)
 
@@ -470,28 +492,6 @@ def train(args, train_dataset, model, tokenizer):
     #         regressor_model, optimizer = amp.initialize(regressor_model, optimizer, opt_level=args.fp16_opt_level)
     #         pretrained_model, optimizer = amp.initialize(pretrained_model, optimizer, opt_level=args.fp16_opt_level)
 
-    # multi-gpu training (should be after apex fp16 initialization)
-    # if args.n_gpu > 1:
-    #     if args.freeze_bert:
-    #         regressor_model = torch.nn.DataParallel(regressor_model)
-    #     else:
-    #         pretrained_model = torch.nn.DataParallel(pretrained_model)
-    #         regressor_model = torch.nn.DataParallel(regressor_model)
-
-    # Distributed training (should be after apex fp16 initialization)
-    # if args.local_rank != -1:
-    #     if args.freeze_bert:
-    #         regressor_model = torch.nn.parallel.DistributedDataParallel(regressor_model, device_ids=[args.local_rank],
-    #                                                           output_device=args.local_rank,
-    #                                                           find_unused_parameters=True)
-    #     else:
-    #         regressor_model = torch.nn.parallel.DistributedDataParallel(regressor_model, device_ids=[args.local_rank],
-    #                                                                  output_device=args.local_rank,
-    #                                                                  find_unused_parameters=True)
-    #         pretrained_model = torch.nn.parallel.DistributedDataParallel(pretrained_model, device_ids=[args.local_rank],
-    #                                                                  output_device=args.local_rank,
-    #                                                                  find_unused_parameters=True)
-
     # Train!
     logger.info("***** Running training *****")
     logger.info("  Num examples = %d", len(train_dataset))
@@ -698,108 +698,107 @@ def train(args, train_dataset, model, tokenizer):
 
 save_results = []
 
-
 def evaluate(args, model, tokenizer, prefix=""):
-    pretrained_model = model[0]
-    regressor_model = model[1]
+    pretrained_finbert_model = model[0]
+    adapter_ensemble_model = model[1]
+    rnn_model = model[2]
+    kpi_model = model[3]
+    
     # Loop to handle MNLI double evaluation (matched, mis-matched)
-    eval_task_names = (
-        ("mnli", "mnli-mm") if args.task_name == "mnli" else (args.task_name,)
-    )
-    eval_outputs_dirs = (
-        (args.output_dir, args.output_dir + "-MM")
-        if args.task_name == "mnli"
-        else (args.output_dir,)
-    )
+    # eval_task_names = (
+    #     ("mnli", "mnli-mm") if args.task_name == "mnli" else (args.task_name,)
+    # )
+    # eval_outputs_dirs = (
+    #     (args.output_dir, args.output_dir + "-MM")
+    #     if args.task_name == "mnli"
+    #     else (args.output_dir,)
+    # )
     results = {}
-    for dataset_type in ["dev", "test"]:
+    # for dataset_type in ["dev", "test"]:
 
-        for eval_task, eval_output_dir in zip(eval_task_names, eval_outputs_dirs):
+        # for eval_task, eval_output_dir in zip(eval_task_names, eval_outputs_dirs):
 
-            eval_dataset = load_and_cache_examples(
-                args, eval_task, tokenizer, dataset_type, evaluate=True
+    eval_dataset = load_and_cache_examples(
+        args, args.task_name, tokenizer, "val", evaluate=True
+    )
+
+    if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
+        os.makedirs(args.output_dir)
+
+    # args.eval_batch_size = args.eval_batch_size * max(1, args.n_gpu)
+    # Note that DistributedSampler samples randomly
+    eval_sampler = (
+        SequentialSampler(eval_dataset)
+        if args.local_rank == -1
+        else DistributedSampler(eval_dataset)
+    )
+    eval_dataloader = DataLoader(
+        eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size
+    )
+
+    # Eval!
+    logger.info("***** Running evaluation {} *****".format(prefix))
+    logger.info("  Num examples = %d", len(eval_dataset))
+    logger.info("  Batch size = %d", args.eval_batch_size)
+    eval_loss = 0.0
+    nb_eval_steps = 0
+    preds = None
+    out_label_ids = None
+    # eval_acc = 0
+    index = 0
+    for batch in tqdm(eval_dataloader, desc="Evaluating"):
+        pretrained_finbert_model.eval()
+        adapter_ensemble_model.eval()
+        rnn_model.eval()
+        index += 1
+        
+        batch = tuple(t.to(args.device) for t in batch)
+        with torch.no_grad():
+            inputs = {
+                "input_ids": batch[0],
+                "attention_mask": batch[1],
+                "token_type_ids": batch[2]
+                if args.model_type in ["bert", "xlnet"]
+                else None,  # XLM and RoBERTa don't use segment_ids
+                "labels": batch[3],
+                "start_id": batch[4],
+            }
+            # outputs = model(**inputs)
+            pretrained_model_outputs = pretrained_finbert_model(**inputs)
+            outputs = adapter_ensemble_model(pretrained_model_outputs, **inputs)
+            tmp_eval_loss, logits = outputs[:2]
+
+            eval_loss += tmp_eval_loss.mean().item()
+        nb_eval_steps += 1
+
+        if preds is None:
+            preds = logits.detach().cpu().numpy()
+            out_label_ids = inputs["labels"].detach().cpu().numpy()
+        else:
+            preds = np.append(preds, logits.detach().cpu().numpy(), axis=0)
+            out_label_ids = np.append(
+                out_label_ids, inputs["labels"].detach().cpu().numpy(), axis=0
             )
 
-            if not os.path.exists(eval_output_dir) and args.local_rank in [-1, 0]:
-                os.makedirs(eval_output_dir)
+    eval_loss = eval_loss / nb_eval_steps
+    if args.output_mode == "classification":
+        preds = np.argmax(preds, axis=1)
+    elif args.output_mode == "regression":
+        preds = np.squeeze(preds)
 
-            args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
-            # Note that DistributedSampler samples randomly
-            eval_sampler = (
-                SequentialSampler(eval_dataset)
-                if args.local_rank == -1
-                else DistributedSampler(eval_dataset)
-            )
-            eval_dataloader = DataLoader(
-                eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size
-            )
+    result = compute_metrics(eval_task, preds, out_label_ids)
+    logger.info("{} micro f1 result:{}".format(dataset_type, result))
 
-            # Eval!
-            logger.info("***** Running evaluation {} *****".format(prefix))
-            logger.info("  Num examples = %d", len(eval_dataset))
-            logger.info("  Batch size = %d", args.eval_batch_size)
-            eval_loss = 0.0
-            nb_eval_steps = 0
-            preds = None
-            out_label_ids = None
-            eval_acc = 0
-            index = 0
-            for batch in tqdm(eval_dataloader, desc="Evaluating"):
-                pretrained_model.eval()
-                regressor_model.eval()
-                # model.eval()
-                index += 1
-                # if index>10:
-                #     break
-                batch = tuple(t.to(args.device) for t in batch)
-                with torch.no_grad():
-                    inputs = {
-                        "input_ids": batch[0],
-                        "attention_mask": batch[1],
-                        "token_type_ids": batch[2]
-                        if args.model_type in ["bert", "xlnet"]
-                        else None,  # XLM and RoBERTa don't use segment_ids
-                        "labels": batch[3],
-                        "start_id": batch[4],
-                    }
-                    # outputs = model(**inputs)
-                    pretrained_model_outputs = pretrained_model(**inputs)
-                    outputs = regressor_model(pretrained_model_outputs, **inputs)
-                    tmp_eval_loss, logits = outputs[:2]
+    results[dataset_type] = result
+    save_result = str(results)
 
-                    eval_loss += tmp_eval_loss.mean().item()
-                nb_eval_steps += 1
-
-                if preds is None:
-                    preds = logits.detach().cpu().numpy()
-                    out_label_ids = inputs["labels"].detach().cpu().numpy()
-                else:
-                    preds = np.append(preds, logits.detach().cpu().numpy(), axis=0)
-                    out_label_ids = np.append(
-                        out_label_ids, inputs["labels"].detach().cpu().numpy(), axis=0
-                    )
-
-            eval_loss = eval_loss / nb_eval_steps
-            if args.task_name == "entity_type":
-                pass
-            elif args.output_mode == "classification":
-                preds = np.argmax(preds, axis=1)
-            elif args.output_mode == "regression":
-                preds = np.squeeze(preds)
-
-            result = compute_metrics(eval_task, preds, out_label_ids)
-            logger.info("{} micro f1 result:{}".format(dataset_type, result))
-
-            results[dataset_type] = result
-            save_result = str(results)
-
-            save_results.append(save_result)
-            result_file = open(
-                os.path.join(args.output_dir, args.my_model_name + "_result.txt"), "w"
-            )
-            for line in save_results:
-                result_file.write(str(dataset_type) + ":" + str(line) + "\n")
-            result_file.close()
+    save_results.append(save_result)
+    result_file = open(
+        os.path.join(args.output_dir, args.my_model_name + "_result.txt"), "w"
+    )
+    for line in save_results:
+        result_file.write(str(dataset_type) + ":" + str(line) + "\n")
+    result_file.close()
     return results
 
 
@@ -1204,21 +1203,37 @@ def main():
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
     # Saving best-practices: if you use defaults names for the model, you can reload it using from_pretrained()
-    # if args.do_train and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
-    #     # Create output directory if needed
-    #     if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
-    #         os.makedirs(args.output_dir)
+    if args.do_train and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
+        # Create output directory if needed
+        if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
+            os.makedirs(args.output_dir)
 
-    #     logger.info("Saving model checkpoint to %s", args.output_dir)
-    #     # Save a trained model, configuration and tokenizer using `save_pretrained()`.
-    #     # They can then be reloaded using `from_pretrained()`
-    #     model_to_save = (
-    #         regressor_model.module
-    #         if hasattr(regressor_model, "module")
-    #         else regressor_model
-    #     )  # Take care of distributed/parallel training
-    #     model_to_save.save_pretrained(args.output_dir)
-    #     tokenizer.save_pretrained(args.output_dir)
+        # Saving Adapter Ensemble BERT like model
+        logger.info("Saving Adapter Ensemble model checkpoint to %s", args.output_dir)
+        # Save a trained model, configuration and tokenizer using `save_pretrained()`.
+        # They can then be reloaded using `from_pretrained()`
+        adapter_ensemble_model_to_save = (
+            adapter_ensemble_model.module
+            if hasattr(adapter_ensemble_model, "module")
+            else adapter_ensemble_model
+        )  # Take care of distributed/parallel training
+        adapter_ensemble_model_to_save.save_pretrained(args.output_dir)
+        tokenizer.save_pretrained(args.output_dir)
+        
+        # Saving RNN model
+        logger.info("Saving RNN model checkpoint to %s", args.output_dir)
+        # Save a trained model
+        # They can then be reloaded using `from_pretrained()`
+        rnn_model_to_save = (
+            rnn_model.module
+            if hasattr(rnn_model, "module")
+            else rnn_model
+        )  # Take care of distributed/parallel training
+        rnn_model_to_save.save_pretrained(args.output_dir)
+        
+        # Saving KPI
+        """Set here"""
+        
 
     # # Evaluation
     # results = {}
@@ -1239,13 +1254,13 @@ def main():
     #         results.update(result)
     # save_result = str(results)
     # save_results.append(save_result)
-    #
+    
     # result_file = open(os.path.join(args.output_dir, args.my_model_name + '_result.txt'), 'w')
     # for line in save_results:
     #     result_file.write(str(line) + '\n')
     # result_file.close()
 
-    # return results
+    return results
 
 
 if __name__ == "__main__":

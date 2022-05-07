@@ -37,13 +37,30 @@ class InputExampleFiling(object):
 
         Args:
             guid: Unique id for the example.
+            list_input_examples_paragraphs: list. List containing InputExampleParagraphs.
+            label: (Optional) float. The label of the example. This should be
+            specified for train and dev examples, but not for test examples.
+        """
+        self.guid = guid
+        self.list_input_examples_paragraphs = list_input_examples_paragraphs
+        self.label = label
+
+
+class InputExampleSentiment(object):
+    """A single training/test example for a single sentiment analysis sameple and label"""
+
+    def __init__(self, guid, text_a, label):
+        """Constructs a InputExampleFiling.
+
+        Args:
+            guid: Unique id for the example.
             text_a: string. The untokenized text of the first sequence. For single
             sequence tasks, only this sequence must be specified.
             label: (Optional) string. The label of the example. This should be
             specified for train and dev examples, but not for test examples.
         """
         self.guid = guid
-        self.list_input_examples_paragraphs = list_input_examples_paragraphs
+        self.text_a = text_a
         self.label = label
 
 
@@ -63,6 +80,16 @@ class InputFeaturesFiling(object):
 
     def __init__(self, list_input_features_paragraphs, label_id) -> None:
         self.list_input_features_paragraphs = list_input_features_paragraphs
+        self.label_id = label_id
+
+
+class InputFeaturesSentiment(object):
+    """A single set of features for the sentiment analysis sample"""
+
+    def __init__(self, input_ids, input_mask, segment_ids, label_id) -> None:
+        self.input_ids = input_ids
+        self.input_mask = input_mask
+        self.segment_ids = segment_ids
         self.label_id = label_id
 
 
@@ -118,7 +145,8 @@ class SECProcessor(DataProcessor):
     def get_train_examples(self, data_dir, percentage_change_type, dataset_type=None):
         """See base class."""
         return self._create_examples(
-            self._read_json(os.path.join(data_dir, "train.json")), percentage_change_type
+            self._read_json(os.path.join(data_dir, "train.json")),
+            percentage_change_type,
         )
 
     def get_dev_examples(self, data_dir, percentage_change_type, dataset_type):
@@ -137,9 +165,7 @@ class SECProcessor(DataProcessor):
         examples = []
         for (i, curr_dict_input) in enumerate(list_of_dicts):
             if "mda_paragraphs" not in curr_dict_input.keys():
-                print(
-                    f"MDA missing {i} | {curr_dict_input[percentage_change_type]}"
-                )
+                print(f"MDA missing {i} | {curr_dict_input[percentage_change_type]}")
                 continue
 
             list_input_examples_paragraphs = []
@@ -157,10 +183,40 @@ class SECProcessor(DataProcessor):
             else:
                 print(f"Absolutely empty filing: {i} | {label}")
 
-            # For testing
-            if i >= 100:
-                break
-            
+        return examples
+
+
+class SECAdapterProcessor(DataProcessor):
+    """Processor for our SEC sentiment analysis data"""
+
+    def get_train_examples(self, data_dir, dataset_type=None):
+        """See base class."""
+        return self._create_examples(
+            self._read_json(os.path.join(data_dir, "train.json"))
+        )
+
+    def get_dev_examples(self, data_dir, dataset_type):
+        """See base class."""
+        return self._create_examples(
+            self._read_json(os.path.join(data_dir, "{}.json".format(dataset_type)))
+        )
+
+    def get_labels(self):
+        """See base class."""
+        return ["positive", "negative"]
+
+    def _create_examples(self, list_of_dicts):
+        """Creates examples for the training and dev sets."""
+        examples = []
+        for (i, curr_dict_input) in enumerate(list_of_dicts):
+            """Implement logic for sentiment analysis data"""
+
+            examples.append(
+                InputExampleSentiment(
+                    i, curr_dict_input["text"], curr_dict_input["label"]
+                )
+            )
+
         return examples
 
 
@@ -262,6 +318,103 @@ def convert_examples_to_features_sec(
     return features
 
 
+def convert_examples_to_features_sec_adapter(
+    examples,
+    label_list,
+    max_seq_length,
+    tokenizer,
+    output_mode,
+    cls_token="[CLS]",
+    sep_token="[SEP]",
+    pad_on_left=False,
+    pad_token=0,
+    pad_token_segment_id=0,
+    sequence_a_segment_id=1,
+    mask_padding_with_zero=True,
+):
+    """Loads a data file into a list of `InputBatch`s
+    `cls_token_at_end` define the location of the CLS token:
+        - False (Default, BERT/XLM pattern): [CLS] + A + [SEP] + B + [SEP]
+        - True (XLNet/GPT pattern): A + [SEP] + B + [SEP] + [CLS]
+    `cls_token_segment_id` define the segment id associated to the CLS token (0 for BERT, 2 for XLNet)
+    """
+
+    # check if pad_token_segment_id should be 0
+    label_map = {label: i for i, label in enumerate(label_list)}
+    features = []
+    for (ex_index, adapter_example) in enumerate(examples):
+        if ex_index % 1000 == 0:
+            logger.info("Writing example %d of %d" % (ex_index, len(examples)))
+
+        sentence = adapter_example.text_a
+        tokens_sentence = tokenizer.tokenize(sentence)
+        # truncate if needed
+        tokens_sentence = (
+            [cls_token] + tokens_sentence[: max_seq_length - 2] + [sep_token]
+        )
+
+        segment_ids = [sequence_a_segment_id] * len(tokens_sentence)
+        input_ids = tokenizer.convert_tokens_to_ids(tokens_sentence)
+
+        # The mask has 1 for real tokens and 0 for padding tokens. Only real
+        # tokens are attended to.
+        input_mask = [1 if mask_padding_with_zero else 0] * len(input_ids)
+
+        # Zero-pad up to the sequence length.
+        padding_length = max_seq_length - len(input_ids)
+        if pad_on_left:
+            input_ids = ([pad_token] * padding_length) + input_ids
+            input_mask = (
+                [0 if mask_padding_with_zero else 1] * padding_length
+            ) + input_mask
+            segment_ids = ([pad_token_segment_id] * padding_length) + segment_ids
+        else:
+            input_ids = input_ids + ([pad_token] * padding_length)
+            input_mask = input_mask + (
+                [0 if mask_padding_with_zero else 1] * padding_length
+            )
+            segment_ids = segment_ids + ([pad_token_segment_id] * padding_length)
+        assert len(input_ids) == max_seq_length
+        assert len(input_mask) == max_seq_length
+        assert len(segment_ids) == max_seq_length
+
+        label_id = label_map[adapter_example.label]
+
+        curr_input_features_sentiment = InputFeaturesSentiment(
+            input_ids, input_mask, segment_ids, label_id
+        )
+
+        if ex_index < 5:
+            logger.info("*** Example ***")
+            logger.info("guid: %s" % (adapter_example.guid))
+            logger.info("tokens: %s" % " ".join([str(x) for x in tokens_sentence]))
+            logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
+            logger.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
+            logger.info("segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
+            logger.info("label: {}".format(label_id))
+
+        features.append(curr_input_features_sentiment)
+
+        # Only for testing purposes
+        # if len(features) >= 1000:
+        #     break
+
+    return features
+
+
+def compute_metrics(task_name, preds, labels):
+    assert len(preds) == len(labels)
+    if task_name == "regression":
+        pass
+        # Some MSE calculation
+        # return figer_scores(preds, labels)
+    elif task_name == "classification":
+        pass
+        # return micro_f1_tacred(preds, labels)
+    else:
+        raise KeyError(task_name)
+
+
 class SECDataset(Dataset):
     def __init__(self, filings_features, labels_ids, max_seq_length):
 
@@ -310,8 +463,8 @@ class SECDataset(Dataset):
         return self.filings_features[index]
 
 
-processors = {"sec_regressor": SECProcessor}
+processors = {"sec_regressor": SECProcessor, "sec_adapter": SECAdapterProcessor}
 
-output_modes = {"sec_regressor": "regression"}
+output_modes = {"sec_regressor": "regression", "sec_adapter": "classification"}
 
-SEC_TASKS_NUM_LABELS = {"sec_regressor": 1}
+SEC_TASKS_NUM_LABELS = {"sec_regressor": 1, "sec_adapter": 1}

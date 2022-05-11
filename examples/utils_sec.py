@@ -93,6 +93,14 @@ class InputFeaturesSentiment(object):
         self.label_id = label_id
 
 
+class InputExamplesKPI(object):
+    """A single set of features for a whole filing"""
+
+    def __init__(self, list_input_features, label_id) -> None:
+        self.input_features = np.array(list_input_features)
+        self.label_id = label_id
+
+
 class DataProcessor(object):
     """Base class for data converters for sequence classification data sets."""
 
@@ -138,6 +146,53 @@ class DataProcessor(object):
                     example.append(line.strip())
             return examples
 
+
+class KPISymbolicProcessor(DataProcessor):
+    """Processor for the KPI data"""
+
+    def get_train_examples(self, data_dir, percentage_change_type, dataset_type=None):
+        """See base class."""
+        return self._create_examples(
+            self._read_json(os.path.join(data_dir, "train.json")),
+            percentage_change_type,
+        )
+
+    def get_dev_examples(self, data_dir, percentage_change_type, dataset_type):
+        """See base class."""
+        return self._create_examples(
+            self._read_json(os.path.join(data_dir, "{}.json".format(dataset_type))),
+            percentage_change_type,
+        )
+
+    def get_labels(self):
+        """See base class."""
+        return 0
+
+    def _create_examples(self, list_of_dicts, percentage_change_type):
+        """Creates examples for the training and dev sets."""
+        examples = []
+        list_of_features_dicts = [
+            "fundamental_data_imputed_full",
+            "fundamental_data_diff_self_t_1",
+            "fundamental_data_diff_self_t_2",
+            "fundamental_data_diff_industry_t",
+            "fundamental_data_diff_industry_t_1",
+            "fundamental_data_diff_industry_t_2",
+        ]
+        for (i, curr_dict_input) in enumerate(list_of_dicts):
+            list_of_curr_features = []
+            for item in list_of_features_dicts:
+                list_of_curr_features += list(curr_dict_input[item].values())
+            if curr_dict_input["is_filing_on_time"]:
+                list_of_curr_features += [0, 1]
+            else:
+                list_of_curr_features += [1, 0]
+
+            assert len(list_of_curr_features) == 116
+            
+            examples.append(InputExamplesKPI(list_of_curr_features, curr_dict_input[percentage_change_type]))
+
+        return examples
 
 class SECProcessor(DataProcessor):
     """Processor for our SEC filings data"""
@@ -463,8 +518,16 @@ class SECDataset(Dataset):
         return self.filings_features[index]
 
 
-processors = {"sec_regressor": SECProcessor, "sec_adapter": SECAdapterProcessor}
+processors = {
+    "sec_regressor": SECProcessor,
+    "sec_adapter": SECAdapterProcessor,
+    "kpi_symbolic": KPISymbolicProcessor,
+}
 
-output_modes = {"sec_regressor": "regression", "sec_adapter": "classification"}
+output_modes = {
+    "sec_regressor": "regression",
+    "sec_adapter": "classification",
+    "kpi_symbolic": "regression",
+}
 
-SEC_TASKS_NUM_LABELS = {"sec_regressor": 1, "sec_adapter": 1}
+SEC_TASKS_NUM_LABELS = {"sec_regressor": 1, "sec_adapter": 1, "kpi_symbolic": 1}

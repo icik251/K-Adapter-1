@@ -1,4 +1,5 @@
 from collections import defaultdict
+import shutil
 import sys
 import os
 
@@ -62,8 +63,16 @@ class RNNModel(nn.Module):
         self.lstm = nn.LSTM(
             self.input_size, self.hidden_size, self.num_layers, batch_first=True
         )
-        self.dropout = nn.Dropout(args.rnn_dropout_prob)
-        self.fc = nn.Linear(self.hidden_size, self.num_classes)
+        self.linear_layers = nn.Sequential(
+            nn.ReLU(),
+            nn.Linear(self.hidden_size, self.hidden_size),
+            nn.Dropout(args.rnn_dropout_prob),
+            nn.ReLU(),
+            nn.Linear(self.hidden_size, 64),
+            nn.Dropout(args.rnn_dropout_prob),
+            nn.ReLU(),
+            nn.Linear(64, self.num_classes),
+        )
 
     def forward(self, x):
         # Set initial hidden and cell states
@@ -80,9 +89,9 @@ class RNNModel(nn.Module):
         )  # out: tensor of shape (batch_size, seq_length, hidden_size)
 
         # Decode the hidden state of the last time step
-        out = self.fc(self.dropout(out[:, -1, :]))
+        out = self.linear_layers(out[:, -1, :])
         return out
-    
+
     def save_pretrained(self, save_directory):
         assert os.path.isdir(
             save_directory
@@ -100,13 +109,29 @@ class KPIModel(nn.Module):
         super(KPIModel, self).__init__()
         self.input_size = args.kpi_input_size
         self.num_classes = args.kpi_num_classes
+        self.hidden_size = args.kpi_hidden_size
+        self.hidden_layers = args.kpi_hidden_layers
 
-        self.fc = nn.Linear(self.input_size, self.num_classes)
+        if self.hidden_layers == 0:
+            self.layers = nn.Linear(self.input_size, self.num_classes)
+        elif self.hidden_layers == 1:
+            self.layers = nn.Sequential(
+                nn.Linear(self.input_size, self.hidden_size),
+                nn.Dropout(args.kpi_dropout_prob),
+                nn.ReLU(),
+                nn.Linear(self.hidden_size, self.num_classes),
+            )
 
-    def forward(self, x):
-        out = self.fc(x)
-        return out
-    
+    def forward(self, x, labels=None):
+        outputs = self.layers(x)
+
+        if labels is not None:
+            loss_fct = MSELoss()
+            loss = loss_fct(outputs.squeeze(1), labels)
+            outputs = (loss, outputs)
+
+        return outputs
+
     def save_pretrained(self, save_directory):
         assert os.path.isdir(
             save_directory
@@ -245,7 +270,9 @@ class AdapterEnsembleModel(nn.Module):
         # Save configuration file
         model_to_save.config.save_pretrained(save_directory)
         # If we save using the predefined names, we can load using `from_pretrained`
-        output_model_file = os.path.join(save_directory, "adapter_ensemble_pytorch_model.bin")
+        output_model_file = os.path.join(
+            save_directory, "adapter_ensemble_pytorch_model.bin"
+        )
         torch.save(model_to_save.state_dict(), output_model_file)
         logger.info("Saving model checkpoint to %s", save_directory)
 
@@ -261,11 +288,13 @@ def load_and_cache_examples(args, task, tokenizer, dataset_type, evaluate=False)
     # Load data features from cache or dataset file
     cached_features_file = os.path.join(
         args.data_dir,
-        "cached_{}_{}_{}_{}".format(
+        "cached_{}_{}_{}_{}_{}_{}".format(
             dataset_type,
             list(filter(None, args.finbert_path.split("/"))).pop(),
             str(args.max_seq_length),
             str(task),
+            str(args.percentage_change_type),
+            str(args.type_text),
         ),
     )
     # Remove "not" when finished with development
@@ -276,11 +305,11 @@ def load_and_cache_examples(args, task, tokenizer, dataset_type, evaluate=False)
         logger.info("Creating features from dataset file at %s", args.data_dir)
         examples = (
             processor.get_dev_examples(
-                args.data_dir, args.percentage_change_type, dataset_type
+                args.data_dir, args.percentage_change_type, args.type_text, dataset_type
             )
             if evaluate
             else processor.get_train_examples(
-                args.data_dir, args.percentage_change_type, dataset_type
+                args.data_dir, args.percentage_change_type, args.type_text, dataset_type
             )
         )
         features = convert_examples_to_features_sec(
@@ -319,28 +348,23 @@ def load_and_cache_examples(args, task, tokenizer, dataset_type, evaluate=False)
             ].segment_ids = torch.tensor(
                 paragraph_feature.segment_ids, dtype=torch.long
             )
+        filing_feature.list_numerical_kpi_features = torch.tensor(
+            filing_feature.list_numerical_kpi_features, dtype=torch.float
+        )
 
-    # all_input_ids = torch.tensor(
-    #     [f.input_ids for f in features], dtype=torch.long
-    # )
-    # all_input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
-    # all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
+    # Process numerical KPI features
+    # kpi_features = torch.tensor([f.list_numerical_kpi_features for f in features], dtype=torch.float)
     if output_mode == "classification":
         all_label_ids = torch.tensor([f.label_id for f in features], dtype=torch.float)
     elif output_mode == "regression":
         all_label_ids = torch.tensor([f.label_id for f in features], dtype=torch.float)
-    # all_start_ids = torch.tensor([f.start_id for f in features], dtype=torch.float)
-
-    # dataset = TensorDataset(
-    #     all_input_ids, all_input_mask, all_segment_ids, all_label_ids
-    # )
 
     dataset = SECDataset(features, all_label_ids, args.max_seq_length)
 
     return dataset
 
 
-def train(args, train_dataset, model, tokenizer):
+def train(args, train_dataset, val_dataset, model, tokenizer):
     """Train the model"""
     pretrained_finbert_model = model[0]
     adapter_ensemble_model = model[1]
@@ -481,17 +505,6 @@ def train(args, train_dataset, model, tokenizer):
         optimizer, warmup_steps=args.warmup_steps, t_total=t_total
     )
 
-    # if args.fp16:
-    #     try:
-    #         from apex import amp
-    #     except ImportError:
-    #         raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
-    #     if args.freeze_bert:
-    #         regressor_model, optimizer = amp.initialize(regressor_model, optimizer, opt_level=args.fp16_opt_level)
-    #     else:
-    #         regressor_model, optimizer = amp.initialize(regressor_model, optimizer, opt_level=args.fp16_opt_level)
-    #         pretrained_model, optimizer = amp.initialize(pretrained_model, optimizer, opt_level=args.fp16_opt_level)
-
     # Train!
     logger.info("***** Running training *****")
     logger.info("  Num examples = %d", len(train_dataset))
@@ -500,23 +513,84 @@ def train(args, train_dataset, model, tokenizer):
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
     logger.info("  Total optimization steps = %d", t_total)
 
-    global_step = 0
-    tr_loss, logging_loss = 0.0, 0.0
+    logger.info("Try resume from checkpoint")
+    if args.restore:
+        if os.path.exists(os.path.join(args.output_dir, "global_step.bin")):
+            logger.info("Load last checkpoint data")
+            global_step = torch.load(os.path.join(args.output_dir, "global_step.bin"))
+            global_step += 1
+            start_epoch = int(global_step / len(train_dataloader)) - 1
+            output_dir = os.path.join(
+                args.output_dir, "checkpoint-{}".format(start_epoch)
+            )
+            logger.info("Load from output_dir {}".format(output_dir))
 
+            optimizer.load_state_dict(
+                torch.load(os.path.join(output_dir, "optimizer.bin"))
+            )
+            scheduler.load_state_dict(
+                torch.load(os.path.join(output_dir, "scheduler.bin"))
+            )
+            adapter_ensemble_model.load_state_dict(
+                torch.load(
+                    os.path.join(output_dir, "adapter_ensemble_pytorch_model.bin")
+                )
+            )
+            rnn_model.load_state_dict(
+                torch.load(os.path.join(output_dir, "rnn_pytorch_model.bin"))
+            )
+
+            # global_step += 1
+            # start_epoch = int(global_step / len(train_dataloader))
+            # Load the epoch that ended and continue from the next one
+            start_epoch += 1
+            start_step = global_step - start_epoch * len(train_dataloader) - 1
+            logger.info(
+                "Start from global_step={} epoch={}".format(global_step, start_epoch)
+            )
+            if args.local_rank in [-1, 0]:
+                tb_writer = SummaryWriter(
+                    log_dir="runs/" + args.my_model_name, purge_step=global_step
+                )
+
+        else:
+            global_step = 0
+            start_epoch = 0
+            start_step = 0
+            if args.local_rank in [-1, 0]:
+                tb_writer = SummaryWriter(
+                    log_dir="runs/" + args.my_model_name, purge_step=global_step
+                )
+
+            logger.info("Start from scratch")
+    else:
+        global_step = 0
+        start_epoch = 0
+        start_step = 0
+        if args.local_rank in [-1, 0]:
+            tb_writer = SummaryWriter(
+                log_dir="runs/" + args.my_model_name, purge_step=global_step
+            )
+            pass
+        logger.info("Start from scratch")
+
+    tr_loss, logging_loss = 0.0, 0.0
     pretrained_finbert_model.zero_grad()
     adapter_ensemble_model.zero_grad()
     rnn_model.zero_grad()
 
     train_iterator = trange(
-        int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0]
+        (start_epoch, int(args.num_train_epochs)),
+        desc="Epoch",
+        disable=args.local_rank not in [-1, 0],
     )
     set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
     loss_fct = MSELoss()
-    for curr_iter in train_iterator:
-        print(curr_iter)
+    for epoch_step in train_iterator:
         epoch_iterator = tqdm(
             train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0]
         )
+        epoch_loss = 0
         for step, batch in enumerate(epoch_iterator):
             # if args.freeze_bert:
             #     pretrained_finbert_model.eval()
@@ -528,7 +602,7 @@ def train(args, train_dataset, model, tokenizer):
             curr_batch_input_ids = defaultdict(list)
             curr_batch_input_masks = defaultdict(list)
             curr_batch_segment_ids = defaultdict(list)
-        
+
             # Organize the input data for the whole batch in a better way
             for item_paragraph in batch[0]:
                 for idx in range(item_paragraph["input_ids"].shape[0]):
@@ -536,7 +610,9 @@ def train(args, train_dataset, model, tokenizer):
                     curr_batch_input_masks[idx].append(
                         item_paragraph["input_mask"][idx]
                     )
-                    curr_batch_segment_ids[idx].append(item_paragraph["segment_ids"][idx])
+                    curr_batch_segment_ids[idx].append(
+                        item_paragraph["segment_ids"][idx]
+                    )
 
             curr_batch_outputs_from_rnn = []
             # Process curr batch of filings from the batch
@@ -564,9 +640,6 @@ def train(args, train_dataset, model, tokenizer):
                         "input_ids": input_ids[None, :].to(args.device),
                         "attention_mask": input_masks[None, :].to(args.device),
                         "token_type_ids": segment_ids[None, :].to(args.device),
-                        # if args.model_type in ["bert", "xlnet"]
-                        # else None,  # XLM and RoBERTa don't use segment_ids
-                        # "labels": batch[1][curr_idx_to_get],
                     }
 
                     pretrained_model_outputs = pretrained_finbert_model(
@@ -595,16 +668,17 @@ def train(args, train_dataset, model, tokenizer):
             # Convert list to tensor for RNN outputs
             curr_batch_outputs_from_rnn = torch.stack(curr_batch_outputs_from_rnn)
             curr_batch_outputs_from_rnn = curr_batch_outputs_from_rnn.squeeze(1)
-            curr_batch_labels = batch[1].to(args.device).unsqueeze(1)
+            curr_batch_labels = batch[2].to(args.device).unsqueeze(1)
+
+            # Run the through the KPI model
+            with torch.no_grad():
+                kpi_outputs = kpi_model(batch[1].to(args.device), curr_batch_labels)
+                kpi_loss = kpi_outputs[0]
+
+            # TODO: Combine the loss in the loss function, write a custom loss fct most probably
 
             loss = loss_fct(curr_batch_outputs_from_rnn, curr_batch_labels)
             epoch_iterator.set_description("loss {}".format(loss))
-
-            # if args.fp16:
-            #     with amp.scale_loss(loss, optimizer) as scaled_loss:
-            #         scaled_loss.backward()
-            #     torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
-            # else:
             loss.backward()
 
             """Clipping gradients"""
@@ -617,79 +691,75 @@ def train(args, train_dataset, model, tokenizer):
             # torch.nn.utils.clip_grad_norm_(rnn_model.parameters(), args.max_grad_norm)
 
             tr_loss += loss.item()
+            epoch_loss += loss.item()
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 optimizer.step()
                 scheduler.step()  # Update learning rate schedule
 
-                # model.zero_grad()
                 # pretrained_finbert_model.zero_grad()
                 adapter_ensemble_model.zero_grad()
                 rnn_model.zero_grad()
                 global_step += 1
 
-                if (
-                    args.local_rank in [-1, 0]
-                    and args.logging_steps > 0
-                    and global_step % args.logging_steps == 0
-                ):
-                    # Log metrics
-                    if (
-                        args.local_rank == -1 and args.evaluate_during_training
-                    ):  # Only evaluate when single GPU otherwise metrics may not average well
-                        results = evaluate(args, model, tokenizer)
-                        for key, value in results.items():
-                            tb_writer.add_scalar(
-                                "eval_{}".format(key), value, global_step
-                            )
-                    tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
-                    tb_writer.add_scalar(
-                        "loss",
-                        (tr_loss - logging_loss) / args.logging_steps,
-                        global_step,
+        # Epoch ended
+        # Log metrics training
+        tb_writer.add_scalar("lr", scheduler.get_lr()[0], epoch_step)
+        tb_writer.add_scalar("loss", epoch_loss / step, epoch_step)
+        # Log metrics evaluation
+        results = evaluate(args, val_dataset, model)
+        for key, value in results.items():
+            tb_writer.add_scalar("eval_{}".format(key), value, epoch_step)
+        if (
+            args.local_rank in [-1, 0]
+            and args.save_epoch_steps > 0
+            and epoch_step % args.save_epoch_steps == 0
+        ):
+            # Save model checkpoint
+            output_dir = os.path.join(
+                args.output_dir, "checkpoint-{}".format(epoch_step)
+            )
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+            rnn_model.save_pretrained(
+                output_dir
+            )  # save to pytorch_model.bin  model.state_dict()
+            adapter_ensemble_model.save_pretrained(
+                output_dir
+            )  # save to pytorch_model.bin  model.state_dict()
+
+            torch.save(
+                optimizer.state_dict(),
+                os.path.join(output_dir, "optimizer.bin"),
+            )
+            torch.save(
+                scheduler.state_dict(),
+                os.path.join(output_dir, "scheduler.bin"),
+            )
+            torch.save(args, os.path.join(output_dir, "training_args.bin"))
+            torch.save(global_step, os.path.join(args.output_dir, "global_step.bin"))
+
+            logger.info(
+                "Saving model checkpoint, optimizer, global_step to %s",
+                output_dir,
+            )
+            if (epoch_step / args.save_epoch_steps) > args.max_save_checkpoints:
+                try:
+                    shutil.rmtree(
+                        os.path.join(
+                            args.output_dir,
+                            "checkpoint-{}".format(
+                                epoch_step
+                                - args.max_save_checkpoints * args.save_epoch_steps
+                            ),
+                        )
                     )
-                    logging_loss = tr_loss
-
-                # if (
-                #     args.local_rank in [-1, 0]
-                #     and args.save_steps > 0
-                #     and global_step % args.save_steps == 0
-                # ):
-                #     # Save model checkpoint
-                #     output_dir = os.path.join(
-                #         args.output_dir, "checkpoint-{}".format(global_step)
-                #     )
-                #     if not os.path.exists(output_dir):
-                #         os.makedirs(output_dir)
-                #     model_to_save = (
-                #         regressor_model.module
-                #         if hasattr(regressor_model, "module")
-                #         else regressor_model
-                #     )  # Take care of distributed/parallel training
-                #     model_to_save.save_pretrained(output_dir)
-                #     model_to_save = (
-                #         pretrained_model.module
-                #         if hasattr(pretrained_model, "module")
-                #         else pretrained_model
-                #     )  # Take care of distributed/parallel training
-                #     model_to_save.save_pretrained(output_dir)
-                #     torch.save(args, os.path.join(output_dir, "training_args.bin"))
-                #     logger.info("Saving model checkpoint to %s", output_dir)
-
-                if args.max_steps > 0 and global_step > args.max_steps:
-                    epoch_iterator.close()
-                    break
+                except OSError as e:
+                    print(e)
 
         if args.max_steps > 0 and global_step > args.max_steps:
-            train_iterator.close()
+            epoch_iterator.close()
             break
-        # model = (pretrained_model, regressor_model)
-        # logger.info("***** evaluating *****")
 
-        # results = evaluate(args, model, tokenizer, prefix="")
-
-        # for key, value in results.items():
-        #     tb_writer.add_scalar('eval_{}'.format(key), value, global_step)
-    #
     if args.local_rank in [-1, 0]:
         tb_writer.close()
 
@@ -698,40 +768,22 @@ def train(args, train_dataset, model, tokenizer):
 
 save_results = []
 
-def evaluate(args, model, tokenizer, prefix=""):
+
+def evaluate(args, eval_dataset, model, prefix=""):
+    loss_fct = MSELoss()
     pretrained_finbert_model = model[0]
     adapter_ensemble_model = model[1]
     rnn_model = model[2]
     kpi_model = model[3]
-    
-    # Loop to handle MNLI double evaluation (matched, mis-matched)
-    # eval_task_names = (
-    #     ("mnli", "mnli-mm") if args.task_name == "mnli" else (args.task_name,)
-    # )
-    # eval_outputs_dirs = (
-    #     (args.output_dir, args.output_dir + "-MM")
-    #     if args.task_name == "mnli"
-    #     else (args.output_dir,)
-    # )
+
     results = {}
-    # for dataset_type in ["dev", "test"]:
-
-        # for eval_task, eval_output_dir in zip(eval_task_names, eval_outputs_dirs):
-
-    eval_dataset = load_and_cache_examples(
-        args, args.task_name, tokenizer, "val", evaluate=True
-    )
 
     if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
         os.makedirs(args.output_dir)
 
     # args.eval_batch_size = args.eval_batch_size * max(1, args.n_gpu)
     # Note that DistributedSampler samples randomly
-    eval_sampler = (
-        SequentialSampler(eval_dataset)
-        if args.local_rank == -1
-        else DistributedSampler(eval_dataset)
-    )
+    eval_sampler = SequentialSampler(eval_dataset)
     eval_dataloader = DataLoader(
         eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size
     )
@@ -739,66 +791,140 @@ def evaluate(args, model, tokenizer, prefix=""):
     # Eval!
     logger.info("***** Running evaluation {} *****".format(prefix))
     logger.info("  Num examples = %d", len(eval_dataset))
-    logger.info("  Batch size = %d", args.eval_batch_size)
+    logger.info("  Validation Batch size = %d", args.eval_batch_size)
     eval_loss = 0.0
     nb_eval_steps = 0
     preds = None
     out_label_ids = None
-    # eval_acc = 0
-    index = 0
+
     for batch in tqdm(eval_dataloader, desc="Evaluating"):
-        pretrained_finbert_model.eval()
         adapter_ensemble_model.eval()
         rnn_model.eval()
-        index += 1
-        
-        batch = tuple(t.to(args.device) for t in batch)
-        with torch.no_grad():
-            inputs = {
-                "input_ids": batch[0],
-                "attention_mask": batch[1],
-                "token_type_ids": batch[2]
-                if args.model_type in ["bert", "xlnet"]
-                else None,  # XLM and RoBERTa don't use segment_ids
-                "labels": batch[3],
-                "start_id": batch[4],
-            }
-            # outputs = model(**inputs)
-            pretrained_model_outputs = pretrained_finbert_model(**inputs)
-            outputs = adapter_ensemble_model(pretrained_model_outputs, **inputs)
-            tmp_eval_loss, logits = outputs[:2]
 
-            eval_loss += tmp_eval_loss.mean().item()
+        curr_batch_input_ids = defaultdict(list)
+        curr_batch_input_masks = defaultdict(list)
+        curr_batch_segment_ids = defaultdict(list)
+
+        # Organize the input data for the whole batch in a better way
+        for item_paragraph in batch[0]:
+            for idx in range(item_paragraph["input_ids"].shape[0]):
+                curr_batch_input_ids[idx].append(item_paragraph["input_ids"][idx])
+                curr_batch_input_masks[idx].append(item_paragraph["input_mask"][idx])
+                curr_batch_segment_ids[idx].append(item_paragraph["segment_ids"][idx])
+
+        curr_batch_outputs_from_rnn = []
+        # Process curr batch of filings from the batch
+        for my_batch in range(len(curr_batch_input_ids)):
+            curr_filing_input_ids = curr_batch_input_ids[my_batch]
+            curr_filing_input_masks = curr_batch_input_masks[my_batch]
+            curr_filing_segment_ids = curr_batch_segment_ids[my_batch]
+
+            curr_filing_encoded_paragraphs = []
+            for input_ids, input_masks, segment_ids in zip(
+                curr_filing_input_ids,
+                curr_filing_input_masks,
+                curr_filing_segment_ids,
+            ):
+                # Check if all paragraphs are processed
+                if (
+                    torch.count_nonzero(input_ids) == 0
+                    and torch.count_nonzero(input_masks) == 0
+                    and torch.count_nonzero(segment_ids) == 0
+                ):
+                    break
+
+                # batch = tuple(t.to(args.device) for t in batch)
+                input_curr_paragraph = {
+                    "input_ids": input_ids[None, :].to(args.device),
+                    "attention_mask": input_masks[None, :].to(args.device),
+                    "token_type_ids": segment_ids[None, :].to(args.device),
+                }
+
+                with torch.no_grad():
+                    pretrained_model_outputs = pretrained_finbert_model(
+                        **input_curr_paragraph
+                    )
+                    encoded_paragraph = adapter_ensemble_model(
+                        pretrained_model_outputs, **input_curr_paragraph
+                    )
+                curr_filing_encoded_paragraphs.append(encoded_paragraph.squeeze(0))
+
+            """
+                Use the RNN and generate the loss for this filing
+            """
+
+            # Convert list to tensor
+            curr_filing_encoded_paragraphs = torch.stack(curr_filing_encoded_paragraphs)
+            curr_filing_encoded_paragraphs = curr_filing_encoded_paragraphs.unsqueeze(
+                0
+            ).to(args.device)
+
+            with torch.no_grad():
+                rnn_output_for_filing = rnn_model(curr_filing_encoded_paragraphs)
+            curr_batch_outputs_from_rnn.append(rnn_output_for_filing)
+
+        # Convert list to tensor for RNN outputs
+        curr_batch_outputs_from_rnn = torch.stack(curr_batch_outputs_from_rnn)
+        curr_batch_outputs_from_rnn = curr_batch_outputs_from_rnn.squeeze(1)
+        curr_batch_labels = batch[2].to(args.device).unsqueeze(1)
+        tmp_eval_loss = loss_fct(curr_batch_outputs_from_rnn, curr_batch_labels)
+        eval_loss += tmp_eval_loss.item()
+
         nb_eval_steps += 1
 
-        if preds is None:
-            preds = logits.detach().cpu().numpy()
-            out_label_ids = inputs["labels"].detach().cpu().numpy()
-        else:
-            preds = np.append(preds, logits.detach().cpu().numpy(), axis=0)
-            out_label_ids = np.append(
-                out_label_ids, inputs["labels"].detach().cpu().numpy(), axis=0
-            )
+    # for batch in tqdm(eval_dataloader, desc="Evaluating"):
+    #     pretrained_finbert_model.eval()
+    #     adapter_ensemble_model.eval()
+    #     rnn_model.eval()
+    #     index += 1
+
+    #     batch = tuple(t.to(args.device) for t in batch)
+    #     with torch.no_grad():
+    #         inputs = {
+    #             "input_ids": batch[0],
+    #             "attention_mask": batch[1],
+    #             "token_type_ids": batch[2]
+    #             if args.model_type in ["bert", "xlnet"]
+    #             else None,  # XLM and RoBERTa don't use segment_ids
+    #             "labels": batch[3],
+    #             "start_id": batch[4],
+    #         }
+    #         # outputs = model(**inputs)
+    #         pretrained_model_outputs = pretrained_finbert_model(**inputs)
+    #         outputs = adapter_ensemble_model(pretrained_model_outputs, **inputs)
+    #         tmp_eval_loss, logits = outputs[:2]
+
+    #         eval_loss += tmp_eval_loss.mean().item()
+    #     nb_eval_steps += 1
+
+    #     if preds is None:
+    #         preds = logits.detach().cpu().numpy()
+    #         out_label_ids = inputs["labels"].detach().cpu().numpy()
+    #     else:
+    #         preds = np.append(preds, logits.detach().cpu().numpy(), axis=0)
+    #         out_label_ids = np.append(
+    #             out_label_ids, inputs["labels"].detach().cpu().numpy(), axis=0
+    #         )
 
     eval_loss = eval_loss / nb_eval_steps
-    if args.output_mode == "classification":
-        preds = np.argmax(preds, axis=1)
-    elif args.output_mode == "regression":
-        preds = np.squeeze(preds)
+    # if args.output_mode == "classification":
+    #     preds = np.argmax(preds, axis=1)
+    # elif args.output_mode == "regression":
+    #     preds = np.squeeze(preds)
 
-    result = compute_metrics(eval_task, preds, out_label_ids)
-    logger.info("{} micro f1 result:{}".format(dataset_type, result))
-
-    results[dataset_type] = result
-    save_result = str(results)
-
-    save_results.append(save_result)
-    result_file = open(
-        os.path.join(args.output_dir, args.my_model_name + "_result.txt"), "w"
+    results["loss"] = eval_loss
+    output_eval_file = os.path.join(
+        args.output_dir, args.my_model_name + "eval_results.txt"
     )
-    for line in save_results:
-        result_file.write(str(dataset_type) + ":" + str(line) + "\n")
-    result_file.close()
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir)
+
+    with open(output_eval_file, "w") as writer:
+        logger.info("***** Eval results  *****")
+        for key in sorted(results.keys()):
+            logger.info("  %s = %s", key, str(results[key]))
+            writer.write("%s = %s\n" % (key, str(results[key])))
+
     return results
 
 
@@ -821,6 +947,13 @@ def main():
         help="Path to pre-trained model",
     )
     parser.add_argument(
+        "--kpi_model_path",
+        default=None,
+        type=str,
+        required=True,
+        help="Path to pre-trained KPI model",
+    )
+    parser.add_argument(
         "--task_name",
         default=None,
         type=str,
@@ -828,6 +961,14 @@ def main():
         help="The name of the task to train selected in the list: "
         + ", ".join(processors.keys()),
     )
+    parser.add_argument(
+        "--type_text",
+        default="mda_paragraphs",
+        type=str,
+        required=True,
+        help="Can be 'mda_paragraphs' or 'mda_sentences'",
+    )
+
     parser.add_argument("--comment", default="", type=str, help="The comment")
     parser.add_argument(
         "--output_dir",
@@ -885,18 +1026,6 @@ def main():
         type=float,
         help="Dropout prob before the Dense layer in the RNN.",
     )
-    parser.add_argument(
-        "--kpi_input_size",
-        default=100,
-        type=int,
-        help="Input size for KPI model.",
-    )
-    parser.add_argument(
-        "--kpi_num_classes",
-        default=1,
-        type=int,
-        help="Output for the regression task for KPI model.",
-    )
     parser.add_argument("--test_mode", default=0, type=int, help="test freeze adapter")
     parser.add_argument(
         "--fusion_mode",
@@ -921,7 +1050,7 @@ def main():
     )
     parser.add_argument(
         "--adapter_skip_layers",
-        default=3,
+        default=3,  # could be 6?
         type=int,
         help="The skip_layers of adapter according to bert layers",
     )
@@ -969,6 +1098,36 @@ def main():
         action="store_true",
         help="Run evaluation during training at each logging step.",
     )
+    parser.add_argument(
+        "--kpi_input_size",
+        default=116,
+        type=int,
+        help="Input size for KPI model.",
+    )
+    parser.add_argument(
+        "--kpi_hidden_layers",
+        default=1,
+        type=int,
+        help="Number of hidden layers for the regression task for KPI model.",
+    )
+    parser.add_argument(
+        "--kpi_hidden_size",
+        default=64,
+        type=int,
+        help="Number of neurons in hidden layer for the regression task for KPI model.",
+    )
+    parser.add_argument(
+        "--kpi_dropout_prob",
+        default=0.2,
+        type=float,
+        help="Number of neurons in hidden layer for the regression task for KPI model.",
+    )
+    parser.add_argument(
+        "--kpi_num_classes",
+        default=1,
+        type=int,
+        help="Output for the regression task for KPI model.",
+    )
     # parser.add_argument(
     #     "--do_lower_case",
     #     action="store_true",
@@ -990,13 +1149,13 @@ def main():
 
     parser.add_argument(
         "--train_batch_size",
-        default=8,
+        default=64,
         type=int,
         help="Batch size for training.",
     )
     parser.add_argument(
         "--eval_batch_size",
-        default=8,
+        default=64,
         type=int,
         help="Batch size for evaluation.",
     )
@@ -1023,7 +1182,7 @@ def main():
     )
     parser.add_argument(
         "--num_train_epochs",
-        default=3.0,
+        default=10,
         type=float,
         help="Total number of training epochs to perform.",
     )
@@ -1040,10 +1199,10 @@ def main():
         "--logging_steps", type=int, default=10, help="Log every X updates steps."
     )
     parser.add_argument(
-        "--save_steps",
+        "--save_epoch_steps",
         type=int,
-        default=1000,
-        help="Save checkpoint every X updates steps.",
+        default=1,
+        help="Save checkpoint every X epochs steps.",
     )
     parser.add_argument(
         "--eval_all_checkpoints",
@@ -1066,6 +1225,12 @@ def main():
     parser.add_argument(
         "--seed", type=int, default=42, help="random seed for initialization"
     )
+    parser.add_argument(
+        "--restore",
+        type=bool,
+        default=True,
+        help="Whether restore from the last checkpoint, is nochenckpoints, start from scartch",
+    )
 
     # parser.add_argument(
     #     "--fp16",
@@ -1079,6 +1244,13 @@ def main():
     #     help="For fp16: Apex AMP optimization level selected in ['O0', 'O1', 'O2', and 'O3']."
     #     "See details at https://nvidia.github.io/apex/amp.html",
     # )
+    parser.add_argument(
+        "--max_save_checkpoints",
+        type=int,
+        default=3,
+        help="The max amounts of checkpoint saving. Bigger than it will delete the former checkpoints",
+    )
+
     parser.add_argument(
         "--local_rank",
         type=int,
@@ -1148,33 +1320,19 @@ def main():
     else:
         sec_adapter = None
 
-    # adapter_model = AdapterModel(pretrained_model.config,num_labels,args.adapter_size,args.adapter_interval,args.adapter_skip_layers)
-
     adapter_ensemble_model = AdapterEnsembleModel(
         args, pretrained_model.config, sec_adapter=sec_adapter
     )
 
     rnn_model = RNNModel(args)
+    # Load KPI model and freeze params
     kpi_model = KPIModel(args)
-
-    # if args.meta_bertmodel:
-    #     model_dict = pretrained_model.state_dict()
-    #     bert_meta_dict = torch.load(args.meta_bertmodel, map_location=lambda storage, loc: storage)
-    #     for item in ['out_proj.weight', 'out_proj.bias', 'dense.weight', 'dense.bias', 'lm_head.bias', 'lm_head.dense.weight', 'lm_head.dense.bias',
-    #                  'lm_head.layer_norm.weight', 'lm_head.layer_norm.bias', 'lm_head.decoder.weight']:
-    #         if item in bert_meta_dict:
-    #             bert_meta_dict.pop(item)
-
-    #     changed_bert_meta = {}
-    #     for key in bert_meta_dict.keys():
-    #         changed_bert_meta[key.replace('model.','roberta.')] = bert_meta_dict[key]
-    #     # print(changed_bert_meta.keys())
-    #     changed_bert_meta = {k: v for k, v in changed_bert_meta.items() if k in model_dict.keys()}
-    #     # print(changed_bert_meta.keys())
-    #     model_dict.update(changed_bert_meta)
-    #     pretrained_model.load_state_dict(model_dict)
-    # if args.local_rank == 0:
-    #     torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
+    kpi_model.load_state_dict(
+        torch.load(args.kpi_model_path, map_location=torch.device(args.device))
+    )
+    for p in kpi_model.parameters():
+        p.requires_grad = False
+    kpi_model.eval()
 
     pretrained_model.to(args.device)
     adapter_ensemble_model.to(args.device)
@@ -1190,6 +1348,10 @@ def main():
 
     logger.info("Training/evaluation parameters %s", args)
 
+    val_dataset = load_and_cache_examples(
+        args, args.task_name, tokenizer, "val", evaluate=True
+    )
+
     # Training
     if args.do_train:
         train_dataset = load_and_cache_examples(
@@ -1198,7 +1360,7 @@ def main():
         # print("Features created!")
         # return
         global_step, tr_loss = train(
-            args, train_dataset, full_ensemble_model, tokenizer
+            args, train_dataset, val_dataset, full_ensemble_model, tokenizer
         )
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
@@ -1219,21 +1381,15 @@ def main():
         )  # Take care of distributed/parallel training
         adapter_ensemble_model_to_save.save_pretrained(args.output_dir)
         tokenizer.save_pretrained(args.output_dir)
-        
+
         # Saving RNN model
         logger.info("Saving RNN model checkpoint to %s", args.output_dir)
         # Save a trained model
         # They can then be reloaded using `from_pretrained()`
         rnn_model_to_save = (
-            rnn_model.module
-            if hasattr(rnn_model, "module")
-            else rnn_model
+            rnn_model.module if hasattr(rnn_model, "module") else rnn_model
         )  # Take care of distributed/parallel training
         rnn_model_to_save.save_pretrained(args.output_dir)
-        
-        # Saving KPI
-        """Set here"""
-        
 
     # # Evaluation
     # results = {}
@@ -1254,13 +1410,13 @@ def main():
     #         results.update(result)
     # save_result = str(results)
     # save_results.append(save_result)
-    
+
     # result_file = open(os.path.join(args.output_dir, args.my_model_name + '_result.txt'), 'w')
     # for line in save_results:
     #     result_file.write(str(line) + '\n')
     # result_file.close()
 
-    return results
+    # return results
 
 
 if __name__ == "__main__":

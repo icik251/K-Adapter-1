@@ -32,17 +32,25 @@ class InputExampleParagraph(object):
 class InputExampleFiling(object):
     """A single training/test example for a single filing."""
 
-    def __init__(self, guid, list_input_examples_paragraphs, label):
+    def __init__(
+        self,
+        guid,
+        list_input_examples_paragraphs,
+        list_of_numerical_kpi_features,
+        label,
+    ):
         """Constructs a InputExampleFiling.
 
         Args:
             guid: Unique id for the example.
             list_input_examples_paragraphs: list. List containing InputExampleParagraphs.
+            list_of_curr_features: list containing the numerical features for the KPI model
             label: (Optional) float. The label of the example. This should be
             specified for train and dev examples, but not for test examples.
         """
         self.guid = guid
         self.list_input_examples_paragraphs = list_input_examples_paragraphs
+        self.list_of_numerical_kpi_features = list_of_numerical_kpi_features
         self.label = label
 
 
@@ -78,8 +86,11 @@ class InputFeaturesParagraph(object):
 class InputFeaturesFiling(object):
     """A single set of features for a whole filing"""
 
-    def __init__(self, list_input_features_paragraphs, label_id) -> None:
+    def __init__(
+        self, list_input_features_paragraphs, list_numerical_kpi_features, label_id
+    ) -> None:
         self.list_input_features_paragraphs = list_input_features_paragraphs
+        self.list_numerical_kpi_features = np.array(list_numerical_kpi_features)
         self.label_id = label_id
 
 
@@ -189,54 +200,87 @@ class KPISymbolicProcessor(DataProcessor):
                 list_of_curr_features += [1, 0]
 
             assert len(list_of_curr_features) == 116
-            
-            examples.append(InputExamplesKPI(list_of_curr_features, curr_dict_input[percentage_change_type]))
+
+            examples.append(
+                InputExamplesKPI(
+                    list_of_curr_features, curr_dict_input[percentage_change_type]
+                )
+            )
 
         return examples
+
 
 class SECProcessor(DataProcessor):
     """Processor for our SEC filings data"""
 
-    def get_train_examples(self, data_dir, percentage_change_type, dataset_type=None):
+    def get_train_examples(self, data_dir, percentage_change_type, type_text, dataset_type=None):
         """See base class."""
         return self._create_examples(
             self._read_json(os.path.join(data_dir, "train.json")),
-            percentage_change_type,
+            percentage_change_type, type_text
         )
 
-    def get_dev_examples(self, data_dir, percentage_change_type, dataset_type):
+    def get_dev_examples(self, data_dir, percentage_change_type, type_text, dataset_type):
         """See base class."""
         return self._create_examples(
             self._read_json(os.path.join(data_dir, "{}.json".format(dataset_type))),
-            percentage_change_type,
+            percentage_change_type, type_text
         )
 
     def get_labels(self):
         """See base class."""
         return 0
 
-    def _create_examples(self, list_of_dicts, percentage_change_type):
+    def _create_examples(
+        self, list_of_dicts, percentage_change_type, type_text="mda_paragraphs"
+    ):
         """Creates examples for the training and dev sets."""
         examples = []
+        list_of_features_dicts = [
+            "fundamental_data_imputed_full",
+            "fundamental_data_diff_self_t_1",
+            "fundamental_data_diff_self_t_2",
+            "fundamental_data_diff_industry_t",
+            "fundamental_data_diff_industry_t_1",
+            "fundamental_data_diff_industry_t_2",
+        ]
         for (i, curr_dict_input) in enumerate(list_of_dicts):
-            if "mda_paragraphs" not in curr_dict_input.keys():
+            if type_text not in curr_dict_input.keys():
                 print(f"MDA missing {i} | {curr_dict_input[percentage_change_type]}")
                 continue
 
+            if type_text == "mda_paragraphs":
+                list_of_texts_for_filing = list(curr_dict_input[type_text].values())
+            elif type_text == "mda_sentences":
+                list_of_texts_for_filing = curr_dict_input[type_text]
+
+            if not list_of_texts_for_filing:
+                print(f"Absolutely empty filing: {i} | {label}")
+                continue
+
+            # Logic for creating KPI and InputExampleParagraphs
+            list_of_curr_features = []
+            for item in list_of_features_dicts:
+                list_of_curr_features += list(curr_dict_input[item].values())
+            if curr_dict_input["is_filing_on_time"]:
+                list_of_curr_features += [0, 1]
+            else:
+                list_of_curr_features += [1, 0]
+
+            assert len(list_of_curr_features) == 116
+
             list_input_examples_paragraphs = []
-            for k, mda_paragraph in curr_dict_input["mda_paragraphs"].items():
-                text_a = mda_paragraph
-                curr_paragraph_per_filing = InputExampleParagraph(text_a=text_a)
+            for item_text in list_of_texts_for_filing:
+                curr_paragraph_per_filing = InputExampleParagraph(text_a=item_text)
                 list_input_examples_paragraphs.append(curr_paragraph_per_filing)
             guid = i
             label = curr_dict_input[percentage_change_type]
 
-            if list_input_examples_paragraphs:
-                examples.append(
-                    InputExampleFiling(guid, list_input_examples_paragraphs, label)
+            examples.append(
+                InputExampleFiling(
+                    guid, list_input_examples_paragraphs, list_of_curr_features, label
                 )
-            else:
-                print(f"Absolutely empty filing: {i} | {label}")
+            )
 
         return examples
 
@@ -364,7 +408,12 @@ def convert_examples_to_features_sec(
             # logger.info("segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
             logger.info("label: {}".format(label_id))
 
-        features.append(InputFeaturesFiling(list_input_features_paragraphs, label_id))
+        list_numerical_kpi_features = filing_example.list_of_numerical_kpi_features
+        features.append(
+            InputFeaturesFiling(
+                list_input_features_paragraphs, list_numerical_kpi_features, label_id
+            )
+        )
 
         # Only for testing purposes
         # if len(features) >= 1000:
@@ -489,9 +538,15 @@ class SECDataset(Dataset):
             if len(curr_list_of_paragraphs) > longest_list_paragraphs:
                 longest_list_paragraphs = len(curr_list_of_paragraphs)
 
-            self.filings_features.append([curr_list_of_paragraphs, labels_ids[idx_f]])
+            self.filings_features.append(
+                [
+                    curr_list_of_paragraphs,
+                    curr_filing_features.list_numerical_kpi_features,
+                    labels_ids[idx_f],
+                ]
+            )
 
-        for idx_for_pad, (list_of_paragraphs, _) in enumerate(self.filings_features):
+        for idx_for_pad, (list_of_paragraphs, _, _) in enumerate(self.filings_features):
             num_to_pad = longest_list_paragraphs - len(list_of_paragraphs)
             tensor_to_pad = torch.zeros(max_seq_length, dtype=torch.long)
             self.filings_features[idx_for_pad][0] = (
@@ -506,15 +561,11 @@ class SECDataset(Dataset):
                 * num_to_pad
             )
 
-        # self.filings_features = filings_features
-        # self.labels_ids = labels_ids
-
     def __len__(self):
         return len(self.filings_features)
 
     def __getitem__(self, index):
         # convert to input features filing to dict to be able to pass it in the batch
-
         return self.filings_features[index]
 
 

@@ -226,6 +226,7 @@ class AdapterEnsembleModel(nn.Module):
         adapter_hidden_states = []
         adapter_hidden_states_count = 0
         for i, adapter_module in enumerate(self.adapter):
+            # Sum the current hidden that comes out of the adapter with the hidden from the pre-trained BERT
             fusion_state = hidden_states[self.adapter_list[i]] + hidden_states_last
             hidden_states_last = adapter_module(fusion_state)
             adapter_hidden_states.append(hidden_states_last)
@@ -233,6 +234,7 @@ class AdapterEnsembleModel(nn.Module):
             if (
                 self.adapter_skip_layers >= 1
             ):  # if adapter_skip_layers>=1, skip connection
+                # If that happens and adapter_skip_layers == 3, we sum the last hidden with the pre-last from the adapter 
                 if adapter_hidden_states_count % self.adapter_skip_layers == 0:
                     hidden_states_last = (
                         hidden_states_last
@@ -750,7 +752,7 @@ def main():
     )
     parser.add_argument(
         "--adapter_skip_layers",
-        default=3,  # could be 6?
+        default=0,
         type=int,
         help="The skip_layers of adapter according to bert layers",
     )
@@ -924,6 +926,9 @@ def main():
     name_prefix = (
         "maxlen-"
         + str(args.max_seq_length)
+        + "_"
+        + "kfold-"
+        + str(args.data_dir.split('_')[-1])
         + "_"
         + "batch-"
         + str(args.train_batch_size)

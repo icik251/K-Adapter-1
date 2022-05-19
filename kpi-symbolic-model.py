@@ -28,16 +28,17 @@ from pytorch_transformers import AdamW, WarmupLinearSchedule
 
 logger = logging.getLogger(__name__)
 
+
 class RMSELoss(nn.Module):
     def __init__(self, eps=1e-6):
         super().__init__()
         self.mse = MSELoss()
         self.eps = eps
-        
-    def forward(self,yhat,y):
-        loss = torch.sqrt(self.mse(yhat,y) + self.eps)
+
+    def forward(self, yhat, y):
+        loss = torch.sqrt(self.mse(yhat, y) + self.eps)
         return loss
-    
+
 
 def set_seed(args):
     random.seed(args.seed)
@@ -67,12 +68,12 @@ class KPIModel(nn.Module):
 
     def forward(self, x, labels=None):
         outputs = self.layers(x)
-        
+
         if labels is not None:
             loss_fct = MSELoss()
             loss = loss_fct(outputs.squeeze(1), labels)
             outputs = (loss, outputs)
-            
+
         return outputs
 
     def save_pretrained(self, save_directory):
@@ -98,11 +99,7 @@ def load_and_cache_examples(args, task, dataset_type, evaluate=False):
     # Load data features from cache or dataset file
     cached_features_file = os.path.join(
         args.data_dir,
-        "cached_{}_{}_{}".format(
-            dataset_type,
-            str(task),
-            args.percentage_change_type
-        ),
+        "cached_{}_{}_{}".format(dataset_type, str(task), args.percentage_change_type),
     )
     # Remove "not" when finished with development
     if os.path.exists(cached_features_file):
@@ -222,12 +219,10 @@ def train(args, train_dataset, val_dataset, model):
             loss.backward()
 
             """Clipping gradients"""
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(), args.max_grad_norm
-            )
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
             tr_loss += loss.item()
             epoch_loss += loss.item()
-            
+
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 scheduler.step()  # Update learning rate schedule
                 optimizer.step()
@@ -242,52 +237,6 @@ def train(args, train_dataset, val_dataset, model):
                 #     tb_writer.add_scalar('lr', scheduler.get_lr()[0], global_step)
                 #     tb_writer.add_scalar('loss', (tr_loss - logging_loss) / args.logging_steps, global_step)
                 #     logging_loss = tr_loss
-
-                if (
-                    args.local_rank in [-1, 0]
-                    and args.save_steps > 0
-                    and global_step % args.save_steps == 0
-                ):
-                    # Save model checkpoint
-                    output_dir = os.path.join(
-                        args.output_dir, "checkpoint-{}".format(global_step)
-                    )
-                    if not os.path.exists(output_dir):
-                        os.makedirs(output_dir)
-                    model.save_pretrained(
-                        output_dir
-                    )  # save to pytorch_model.bin  model.state_dict()
-
-                    torch.save(
-                        optimizer.state_dict(),
-                        os.path.join(output_dir, "optimizer.bin"),
-                    )
-                    torch.save(
-                        scheduler.state_dict(),
-                        os.path.join(output_dir, "scheduler.bin"),
-                    )
-                    torch.save(args, os.path.join(output_dir, "training_args.bin"))
-                    torch.save(
-                        global_step, os.path.join(args.output_dir, "global_step.bin")
-                    )
-
-                    logger.info(
-                        "Saving model checkpoint, optimizer, global_step to %s",
-                        output_dir,
-                    )
-                    if (global_step / args.save_steps) > args.max_save_checkpoints:
-                        try:
-                            shutil.rmtree(
-                                os.path.join(
-                                    args.output_dir,
-                                    "checkpoint-{}".format(
-                                        global_step
-                                        - args.max_save_checkpoints * args.save_steps
-                                    ),
-                                )
-                            )
-                        except OSError as e:
-                            print(e)
                 # if (
                 #     args.local_rank == -1
                 #     and args.evaluate_during_training
@@ -298,16 +247,60 @@ def train(args, train_dataset, val_dataset, model):
                 #         tb_writer.add_scalar('eval_{}'.format(key), value, global_step)
             if args.max_steps > 0 and global_step > args.max_steps:
                 break
-        
+
         # Epoch ended
         # Log metrics training
-        tb_writer.add_scalar('lr', scheduler.get_lr()[0], epoch_step)
-        tb_writer.add_scalar('loss', epoch_loss / step, epoch_step)
+        tb_writer.add_scalar("lr", scheduler.get_lr()[0], epoch_step)
+        tb_writer.add_scalar("loss", epoch_loss / step, epoch_step)
         # Log metrics evaluation
         results = evaluate(args, val_dataset, model)
         for key, value in results.items():
-            tb_writer.add_scalar('eval_{}'.format(key), value, epoch_step)
-        
+            tb_writer.add_scalar("eval_{}".format(key), value, epoch_step)
+
+        if (
+            args.local_rank in [-1, 0]
+            and args.save_epoch_steps > 0
+            and epoch_step % args.save_epoch_steps == 0
+        ):
+            # Save model checkpoint
+            output_dir = os.path.join(
+                args.output_dir, "checkpoint-{}".format(epoch_step)
+            )
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+            model.save_pretrained(
+                output_dir
+            )  # save to pytorch_model.bin  model.state_dict()
+
+            torch.save(
+                optimizer.state_dict(),
+                os.path.join(output_dir, "optimizer.bin"),
+            )
+            torch.save(
+                scheduler.state_dict(),
+                os.path.join(output_dir, "scheduler.bin"),
+            )
+            torch.save(args, os.path.join(output_dir, "training_args.bin"))
+            torch.save(global_step, os.path.join(args.output_dir, "global_step.bin"))
+
+            logger.info(
+                "Saving model checkpoint, optimizer, global_step to %s",
+                output_dir,
+            )
+            if (epoch_step / args.save_epoch_steps) > args.max_save_checkpoints:
+                try:
+                    shutil.rmtree(
+                        os.path.join(
+                            args.output_dir,
+                            "checkpoint-{}".format(
+                                epoch_step
+                                - args.max_save_checkpoints * args.save_epoch_steps
+                            ),
+                        )
+                    )
+                except OSError as e:
+                    print(e)
+
         if args.max_steps > 0 and global_step > args.max_steps:
             break
 
@@ -315,6 +308,7 @@ def train(args, train_dataset, val_dataset, model):
         tb_writer.close()
 
     return global_step, tr_loss / global_step
+
 
 save_results = []
 
@@ -330,7 +324,7 @@ def evaluate(args, eval_dataset, model, prefix=""):
 
     # args.eval_batch_size = args.eval_batch_size * max(1, args.n_gpu)
     # Note that DistributedSampler samples randomly
-    eval_sampler = (SequentialSampler(eval_dataset))
+    eval_sampler = SequentialSampler(eval_dataset)
     eval_dataloader = DataLoader(
         eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size
     )
@@ -383,7 +377,7 @@ def evaluate(args, eval_dataset, model, prefix=""):
     )
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
-        
+
     with open(output_eval_file, "w") as writer:
         logger.info("***** Eval results  *****")
         for key in sorted(results.keys()):
@@ -391,6 +385,7 @@ def evaluate(args, eval_dataset, model, prefix=""):
             writer.write("%s = %s\n" % (key, str(results[key])))
 
     return results
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -530,10 +525,10 @@ def main():
         "--logging_steps", type=int, default=10, help="Log every X updates steps."
     )
     parser.add_argument(
-        "--save_steps",
+        "--save_epoch_steps",
         type=int,
-        default=1000,
-        help="Save checkpoint every X updates steps.",
+        default=1,
+        help="Save checkpoint every X epochs steps.",
     )
     parser.add_argument(
         "--eval_all_checkpoints",
@@ -603,10 +598,8 @@ def main():
 
     logger.info("Training/evaluation parameters %s", args)
 
-    val_dataset = load_and_cache_examples(
-        args, args.task_name, "val", evaluate=True
-    )
-    
+    val_dataset = load_and_cache_examples(args, args.task_name, "val", evaluate=True)
+
     # Training
     if args.do_train:
         train_dataset = load_and_cache_examples(

@@ -234,7 +234,7 @@ class AdapterEnsembleModel(nn.Module):
             if (
                 self.adapter_skip_layers >= 1
             ):  # if adapter_skip_layers>=1, skip connection
-                # If that happens and adapter_skip_layers == 3, we sum the last hidden with the pre-last from the adapter 
+                # If that happens and adapter_skip_layers == 3, we sum the last hidden with the pre-last from the adapter
                 if adapter_hidden_states_count % self.adapter_skip_layers == 0:
                     hidden_states_last = (
                         hidden_states_last
@@ -519,35 +519,12 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
             tr_loss += loss.item()
             epoch_loss += loss.item()
             if (step + 1) % args.gradient_accumulation_steps == 0:
-                scheduler.step()  # Update learning rate schedule
                 optimizer.step()
+                scheduler.step()  # Update learning rate schedule
                 # model.zero_grad()
                 pretrained_finbert_model.zero_grad()
                 adapter_ensemble_model.zero_grad()
                 global_step += 1
-                # if (
-                #     args.local_rank in [-1, 0]
-                #     and args.logging_steps > 0
-                #     and global_step % args.logging_steps == 0
-                # ):
-                #     # Log metrics
-                #     tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
-                #     tb_writer.add_scalar(
-                #         "loss",
-                #         (tr_loss - logging_loss) / args.logging_steps,
-                #         global_step,
-                #     )
-                #     logging_loss = tr_loss
-
-                # if (
-                #     args.local_rank == -1
-                #     and args.evaluate_during_training
-                #     and global_step % args.eval_steps == 0
-                # ):  # Only evaluate when single GPU otherwise metrics may not average well
-                #     model = (pretrained_finbert_model, adapter_ensemble_model)
-                #     results = evaluate(args, val_dataset, model, tokenizer)
-                #     for key, value in results.items():
-                #         tb_writer.add_scalar("eval_{}".format(key), value, global_step)
 
         # Epoch ended
         # Make start_step = 0
@@ -705,11 +682,11 @@ def main():
 
     ## Required parameters
     parser.add_argument(
-        "--data_dir",
+        "--data_dirs",
         default=None,
         type=str,
         required=True,
-        help="The input data dir. Should contain the .tsv files (or other data files) for the task.",
+        help="The input data dirs that are for each k-fold. Should contain the .tsv files (or other data files) for the task. Pass only single data dir if the final training is done",
     )
     parser.add_argument(
         "--finbert_path",
@@ -839,7 +816,7 @@ def main():
     parser.add_argument(
         "--num_train_epochs",
         default=100,
-        type=float,
+        type=int,
         help="Total number of training epochs to perform.",
     )
     parser.add_argument(
@@ -922,134 +899,146 @@ def main():
     args.adapter_list = args.adapter_list.split(",")
     args.adapter_list = [int(i) for i in args.adapter_list]
 
-    # name_prefix = f"{list(filter(None, args.finbert_path.split('/'))).pop()}_{args.percentage_change_type}_kfold-{args.data_dir.split('_')[-1]}_max_seq-{args.max_seq_length}_rnn_num_layers-{args.rnn_num_layers}_rnn_hidden_size-{args.rnn_hidden_size}_batch-{args.train_batch_size}_lr-{args.learning_rate}_warmup-{args.warmup_steps}_epoch-{args.num_train_epochs}_comment-{args.comment}"
-    name_prefix = (
-        "maxlen-"
-        + str(args.max_seq_length)
-        + "_"
-        + "kfold-"
-        + str(args.data_dir.split('_')[-1])
-        + "_"
-        + "batch-"
-        + str(args.train_batch_size)
-        + "_"
-        + "lr-"
-        + str(args.learning_rate)
-        + "_"
-        + "warmup-"
-        + str(args.warmup_steps)
-        + "_"
-        + "epoch-"
-        + str(args.num_train_epochs)
-        + "_"
-        + str(args.comment)
-    )
-    args.my_model_name = args.task_name + "_" + name_prefix
-    args.output_dir = os.path.join(args.output_dir, args.my_model_name)
+    for data_dir in args.data_dirs.split(","):
+        args.data_dir = data_dir
 
-    if args.eval_steps is None:
-        args.eval_steps = args.save_epoch_steps * 10
-
-    # Setup CUDA, GPU & distributed training
-    if args.local_rank == -1 or args.no_cuda:
-        device = torch.device(
-            "cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu"
+        # name_prefix = f"{list(filter(None, args.finbert_path.split('/'))).pop()}_{args.percentage_change_type}_kfold-{args.data_dir.split('_')[-1]}_max_seq-{args.max_seq_length}_rnn_num_layers-{args.rnn_num_layers}_rnn_hidden_size-{args.rnn_hidden_size}_batch-{args.train_batch_size}_lr-{args.learning_rate}_warmup-{args.warmup_steps}_epoch-{args.num_train_epochs}_comment-{args.comment}"
+        name_prefix = (
+            "maxlen-"
+            + str(args.max_seq_length)
+            + "_"
+            + "kfold-"
+            + str(args.data_dir.split("_")[-1])
+            + "_"
+            + "batch-"
+            + str(args.train_batch_size)
+            + "_"
+            + "lr-"
+            + str(args.learning_rate)
+            + "_"
+            + "warmup-"
+            + str(args.warmup_steps)
+            + "_"
+            + "epoch-"
+            + str(args.num_train_epochs)
+            + "_"
+            + str(args.comment)
         )
-        args.n_gpu = torch.cuda.device_count()
-    # else:  # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
-    #     torch.cuda.set_device(args.local_rank)
-    #     device = torch.device("cuda", args.local_rank)
-    #     torch.distributed.init_process_group(backend="nccl")
-    #     args.n_gpu = 1
-    args.device = device
+        args.my_model_name = args.task_name + "_" + name_prefix
+        if args.output_dir != "./output":
+            args.output_dir = "./output"
+        args.output_dir = os.path.join(args.output_dir, args.my_model_name)
 
-    # Setup logging
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        level=logging.INFO if args.local_rank in [-1, 0] else logging.WARN,
-    )
-    # logger.warning(
-    #     "Process rank: %s, device: %s, n_gpu: %s, distributed training: %s, 16-bits training: %s",
-    #     args.local_rank,
-    #     device,
-    #     args.n_gpu,
-    #     bool(args.local_rank != -1),
-    #     args.fp16,
-    # )
+        if args.eval_steps is None:
+            args.eval_steps = args.save_epoch_steps * 10
 
-    logger.warning("Process rank: %s, device: %s", args.local_rank, device)
+        # Setup CUDA, GPU & distributed training
+        if args.local_rank == -1 or args.no_cuda:
+            device = torch.device(
+                "cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu"
+            )
+            args.n_gpu = torch.cuda.device_count()
+        # else:  # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
+        #     torch.cuda.set_device(args.local_rank)
+        #     device = torch.device("cuda", args.local_rank)
+        #     torch.distributed.init_process_group(backend="nccl")
+        #     args.n_gpu = 1
+        args.device = device
 
-    # Set seed
-    set_seed(args)
-
-    args.output_mode = output_modes[args.task_name]
-
-    # Choose tokenizer for BERT or FinBERT
-    if list(filter(None, args.finbert_path.split("/"))).pop() == "bert-base-uncased":
-        tokenizer = BertTokenizerLocal.from_pretrained("bert-base-uncased")
-    elif list(filter(None, args.finbert_path.split("/"))).pop() == "FinBERT":
-        tokenizer = BertTokenizerHugging.from_pretrained(
-            "yiyanghkust/finbert-tone", model_max_length=args.max_seq_length
+        # Setup logging
+        logging.basicConfig(
+            format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
+            datefmt="%m/%d/%Y %H:%M:%S",
+            level=logging.INFO if args.local_rank in [-1, 0] else logging.WARN,
         )
-    pretrained_model = PretrainedModel(args)
-    adapter_ensemble_model = AdapterEnsembleModel(args, pretrained_model.config)
+        # logger.warning(
+        #     "Process rank: %s, device: %s, n_gpu: %s, distributed training: %s, 16-bits training: %s",
+        #     args.local_rank,
+        #     device,
+        #     args.n_gpu,
+        #     bool(args.local_rank != -1),
+        #     args.fp16,
+        # )
 
-    if args.meta_adapter_model:
-        model_dict = adapter_ensemble_model.state_dict()
-        logger.info("Adapter model weight:")
-        logger.info(adapter_ensemble_model.state_dict().keys())
-        logger.info("Load model state dict from {}".format(args.meta_adapter_model))
-        adapter_meta_dict = torch.load(
-            args.meta_adapter_model, map_location=lambda storage, loc: storage
+        logger.warning("Process rank: %s, device: %s", args.local_rank, device)
+
+        # Set seed
+        set_seed(args)
+
+        args.output_mode = output_modes[args.task_name]
+
+        # Choose tokenizer for BERT or FinBERT
+        if (
+            list(filter(None, args.finbert_path.split("/"))).pop()
+            == "bert-base-uncased"
+        ):
+            tokenizer = BertTokenizerLocal.from_pretrained("bert-base-uncased")
+        elif list(filter(None, args.finbert_path.split("/"))).pop() == "FinBERT":
+            tokenizer = BertTokenizerHugging.from_pretrained(
+                "yiyanghkust/finbert-tone", model_max_length=args.max_seq_length
+            )
+        pretrained_model = PretrainedModel(args)
+        adapter_ensemble_model = AdapterEnsembleModel(args, pretrained_model.config)
+
+        if args.meta_adapter_model:
+            model_dict = adapter_ensemble_model.state_dict()
+            logger.info("Adapter model weight:")
+            logger.info(adapter_ensemble_model.state_dict().keys())
+            logger.info("Load model state dict from {}".format(args.meta_adapter_model))
+            adapter_meta_dict = torch.load(
+                args.meta_adapter_model, map_location=lambda storage, loc: storage
+            )
+            logger.info("Load pretraiend adapter model state dict ")
+            logger.info(adapter_meta_dict.keys())
+
+            changed_adapter_meta = {}
+            for key in adapter_meta_dict.keys():
+                changed_adapter_meta[
+                    key.replace("encoder.", "adapter.encoder.")
+                ] = adapter_meta_dict[key]
+
+            changed_adapter_meta = {
+                k: v for k, v in changed_adapter_meta.items() if k in model_dict.keys()
+            }
+            model_dict.update(changed_adapter_meta)
+            adapter_ensemble_model.load_state_dict(model_dict)
+        pretrained_model.to(args.device)
+        adapter_ensemble_model.to(args.device)
+
+        model = (pretrained_model, adapter_ensemble_model)
+
+        logger.info("Training/evaluation parameters %s", args)
+
+        val_dataset = load_and_cache_examples(
+            args, args.task_name, tokenizer, "val", evaluate=True
         )
-        logger.info("Load pretraiend adapter model state dict ")
-        logger.info(adapter_meta_dict.keys())
 
-        changed_adapter_meta = {}
-        for key in adapter_meta_dict.keys():
-            changed_adapter_meta[
-                key.replace("encoder.", "adapter.encoder.")
-            ] = adapter_meta_dict[key]
+        # Training
+        if args.do_train:
+            train_dataset = load_and_cache_examples(
+                args, args.task_name, tokenizer, "train", evaluate=False
+            )
 
-        changed_adapter_meta = {
-            k: v for k, v in changed_adapter_meta.items() if k in model_dict.keys()
-        }
-        model_dict.update(changed_adapter_meta)
-        adapter_ensemble_model.load_state_dict(model_dict)
-    pretrained_model.to(args.device)
-    adapter_ensemble_model.to(args.device)
+            global_step, tr_loss = train(
+                args, train_dataset, val_dataset, model, tokenizer
+            )
+            logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
-    model = (pretrained_model, adapter_ensemble_model)
+        if args.do_train and (
+            args.local_rank == -1 or torch.distributed.get_rank() == 0
+        ):
+            # Create output directory if needed
+            if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
+                os.makedirs(args.output_dir)
 
-    logger.info("Training/evaluation parameters %s", args)
-
-    val_dataset = load_and_cache_examples(
-        args, args.task_name, tokenizer, "val", evaluate=True
-    )
-
-    # Training
-    if args.do_train:
-        train_dataset = load_and_cache_examples(
-            args, args.task_name, tokenizer, "train", evaluate=False
-        )
-
-        global_step, tr_loss = train(args, train_dataset, val_dataset, model, tokenizer)
-        logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
-
-    if args.do_train and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
-        # Create output directory if needed
-        if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
-            os.makedirs(args.output_dir)
-
-        logger.info("Saving model checkpoint to %s", args.output_dir)
-        # model_to_save = (
-        #     model.module if hasattr(model, "module") else model
-        # )  # Take care of distributed/parallel training
-        model_to_save = adapter_ensemble_model
-        model_to_save.save_pretrained(args.output_dir)
-        tokenizer.save_pretrained(args.output_dir)
-        torch.save(args, os.path.join(args.output_dir, "training_args.bin"))
+            logger.info("Saving model checkpoint to %s", args.output_dir)
+            # model_to_save = (
+            #     model.module if hasattr(model, "module") else model
+            # )  # Take care of distributed/parallel training
+            model_to_save = adapter_ensemble_model
+            model_to_save.save_pretrained(args.output_dir)
+            tokenizer.save_pretrained(args.output_dir)
+            torch.save(args, os.path.join(args.output_dir, "training_args.bin"))
 
 
 if __name__ == "__main__":

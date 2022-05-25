@@ -182,24 +182,16 @@ class KPISymbolicProcessor(DataProcessor):
     def _create_examples(self, list_of_dicts, percentage_change_type):
         """Creates examples for the training and dev sets."""
         examples = []
-        list_of_features_dicts = [
-            "fundamental_data_imputed_full",
-            "fundamental_data_diff_self_t_1",
-            "fundamental_data_diff_self_t_2",
-            "fundamental_data_diff_industry_t",
-            "fundamental_data_diff_industry_t_1",
-            "fundamental_data_diff_industry_t_2",
-        ]
+        features_scaled_type = (
+            "features_scaled_" + percentage_change_type.split("_")[-1]
+        )
         for (i, curr_dict_input) in enumerate(list_of_dicts):
-            list_of_curr_features = []
-            for item in list_of_features_dicts:
-                list_of_curr_features += list(curr_dict_input[item].values())
             if curr_dict_input["is_filing_on_time"]:
-                list_of_curr_features += [0, 1]
+                list_of_curr_features = curr_dict_input[features_scaled_type] + [0, 1]
             else:
-                list_of_curr_features += [1, 0]
+                list_of_curr_features = curr_dict_input[features_scaled_type] + [1, 0]
 
-            assert len(list_of_curr_features) == 116
+            assert len(list_of_curr_features) == 97
 
             examples.append(
                 InputExamplesKPI(
@@ -213,18 +205,24 @@ class KPISymbolicProcessor(DataProcessor):
 class SECProcessor(DataProcessor):
     """Processor for our SEC filings data"""
 
-    def get_train_examples(self, data_dir, percentage_change_type, type_text, dataset_type=None):
+    def get_train_examples(
+        self, data_dir, percentage_change_type, type_text, dataset_type=None
+    ):
         """See base class."""
         return self._create_examples(
             self._read_json(os.path.join(data_dir, "train.json")),
-            percentage_change_type, type_text
+            percentage_change_type,
+            type_text,
         )
 
-    def get_dev_examples(self, data_dir, percentage_change_type, type_text, dataset_type):
+    def get_dev_examples(
+        self, data_dir, percentage_change_type, type_text, dataset_type
+    ):
         """See base class."""
         return self._create_examples(
             self._read_json(os.path.join(data_dir, "{}.json".format(dataset_type))),
-            percentage_change_type, type_text
+            percentage_change_type,
+            type_text,
         )
 
     def get_labels(self):

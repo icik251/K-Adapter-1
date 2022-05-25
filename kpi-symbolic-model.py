@@ -519,7 +519,7 @@ def main():
         help="If > 0: set total number of training steps to perform. Override num_train_epochs.",
     )
     parser.add_argument(
-        "--warmup_steps", default=0, type=int, help="Linear warmup over warmup_steps."
+        "--warmup_steps", default=400, type=int, help="Linear warmup over warmup_steps."
     )
     parser.add_argument(
         "--logging_steps", type=int, default=10, help="Log every X updates steps."

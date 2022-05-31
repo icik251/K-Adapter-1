@@ -235,7 +235,6 @@ class SECProcessor(DataProcessor):
         """Creates examples for the training and dev sets."""
         examples = []
         list_of_features_dicts = [
-            "fundamental_data_imputed_full",
             "fundamental_data_diff_self_t_1",
             "fundamental_data_diff_self_t_2",
             "fundamental_data_diff_industry_t",
@@ -265,7 +264,7 @@ class SECProcessor(DataProcessor):
             else:
                 list_of_curr_features += [1, 0]
 
-            assert len(list_of_curr_features) == 116
+            assert len(list_of_curr_features) == 97
 
             list_input_examples_paragraphs = []
             for item_text in list_of_texts_for_filing:
@@ -279,6 +278,9 @@ class SECProcessor(DataProcessor):
                     guid, list_input_examples_paragraphs, list_of_curr_features, label
                 )
             )
+            # For testing
+            if len(examples) >= 300:
+                break
 
         return examples
 

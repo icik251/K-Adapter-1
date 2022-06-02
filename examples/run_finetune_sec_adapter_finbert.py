@@ -306,7 +306,7 @@ class AdapterModel(nn.Module):
     def forward(self, pretrained_model_outputs):
 
         outputs = pretrained_model_outputs
-        sequence_output = outputs[0]  # 12-th hidden layer
+        sequence_output = outputs[0]  # 12-th hidden layer (11th idx)
         # pooler_output = outputs[1]
         hidden_states = outputs[2]  # all hidden layers so we can take 0,5,11 later
         num = len(hidden_states)
@@ -548,100 +548,33 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
     """
         Optimizer and Scheduler for BERT models
     """
-    # no_decay = ["bias", "LayerNorm.weight"]
+    no_decay = ["bias", "LayerNorm.weight"]
     # This lets us combine parameters which we want to change using the optimizer. Can be from couple of models
     # Use these grouped parameters only if we want to touch the BERT weights as well
-    # if args.freeze_bert:
-    #     optimizer_grouped_parameters = [
-    #         # Adapter Ensemble Bert model parameters
-    #         {
-    #             "params": [
-    #                 p
-    #                 for n, p in adapter_ensemble_model.named_parameters()
-    #                 if not any(nd in n for nd in no_decay)
-    #             ],
-    #             "weight_decay": args.weight_decay,
-    #         },
-    #         {
-    #             "params": [
-    #                 p
-    #                 for n, p in adapter_ensemble_model.named_parameters()
-    #                 if any(nd in n for nd in no_decay)
-    #             ],
-    #             "weight_decay": 0.0,
-    #         },
-    #         # RNN Model parameters
-    #         {
-    #             "params": [
-    #                 p
-    #                 for n, p in rnn_model.named_parameters()
-    #                 if not any(nd in n for nd in no_decay)
-    #             ],
-    #             "weight_decay": args.weight_decay,
-    #         },
-    #         {
-    #             "params": [
-    #                 p
-    #                 for n, p in rnn_model.named_parameters()
-    #                 if any(nd in n for nd in no_decay)
-    #             ],
-    #             "weight_decay": 0.0,
-    #         },
-    #     ]
-    # else:
-    # optimizer_grouped_parameters = [
-    #     {
-    #         "params": [
-    #             p
-    #             for n, p in adapter_ensemble_model.named_parameters()
-    #             if not any(nd in n for nd in no_decay)
-    #         ],
-    #         "weight_decay": args.weight_decay,
-    #     },
-    #     {
-    #         "params": [
-    #             p
-    #             for n, p in adapter_ensemble_model.named_parameters()
-    #             if any(nd in n for nd in no_decay)
-    #         ],
-    #         "weight_decay": 0.0,
-    #     },
-    #     {
-    #         "params": [
-    #             p
-    #             for n, p in pretrained_finbert_model.named_parameters()
-    #             if not any(nd in n for nd in no_decay)
-    #         ],
-    #         "weight_decay": args.weight_decay,
-    #     },
-    #     {
-    #         "params": [
-    #             p
-    #             for n, p in pretrained_finbert_model.named_parameters()
-    #             if any(nd in n for nd in no_decay)
-    #         ],
-    #         "weight_decay": 0.0,
-    #     },
-    #     {
-    #         "params": [
-    #             p
-    #             for n, p in rnn_model.named_parameters()
-    #             if not any(nd in n for nd in no_decay)
-    #         ],
-    #         "weight_decay": args.weight_decay,
-    #     },
-    #     {
-    #         "params": [
-    #             p
-    #             for n, p in rnn_model.named_parameters()
-    #             if any(nd in n for nd in no_decay)
-    #         ],
-    #         "weight_decay": 0.0,
-    #     },
-    # ]
+    if args.grouped_params:
+        optimizer_grouped_parameters = [
+            # Adapter Ensemble Bert model parameters
+            {
+                "params": [
+                    p
+                    for n, p in adapter_ensemble_model.named_parameters()
+                    if any(nd in n for nd in no_decay)
+                ],
+                "weight_decay": 0.0,
+            },
+            # RNN Model parameters
+            {
+                "params": [
+                    p
+                    for n, p in rnn_model.named_parameters()
+                    if any(nd in n for nd in no_decay)
+                ],
+                "weight_decay": 0.0,
+            },
+        ]
+    else:
+        optimizer_grouped_parameters = rnn_model.parameters()
 
-    # Comment out if using the real grouped parameters
-    optimizer_grouped_parameters = rnn_model.parameters()
     optimizer = AdamW(
         optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon
     )
@@ -724,7 +657,8 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
     rnn_model.zero_grad()
 
     train_iterator = trange(
-        start_epoch, int(args.num_train_epochs),
+        start_epoch,
+        int(args.num_train_epochs),
         desc="Epoch",
         disable=args.local_rank not in [-1, 0],
     )
@@ -737,11 +671,7 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
         rnn_epoch_loss = 0
         overall_epoch_loss = 0
         for step, batch in enumerate(epoch_iterator):
-            # if args.freeze_bert:
-            #     pretrained_finbert_model.eval()
-            # else:
-            #     pretrained_finbert_model.train()
-            # adapter_ensemble_model.train()
+            adapter_ensemble_model.train()
             rnn_model.train()
 
             curr_batch_input_ids = defaultdict(list)
@@ -774,9 +704,9 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
                 ):
                     # Check if all paragraphs are processed
                     if (
-                        torch.count_nonzero(input_ids) == 0
-                        and torch.count_nonzero(input_masks) == 0
-                        and torch.count_nonzero(segment_ids) == 0
+                        np.count_nonzero(input_ids) == 0
+                        and np.count_nonzero(input_masks) == 0
+                        and np.count_nonzero(segment_ids) == 0
                     ):
                         break
 
@@ -838,13 +768,13 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
             epoch_iterator.set_description("rnn tr loss {}".format(rnn_loss))
 
             """Clipping gradients"""
-            # torch.nn.utils.clip_grad_norm_(
-            #     pretrained_finbert_model.parameters(), args.max_grad_norm
-            # )
-            # torch.nn.utils.clip_grad_norm_(
-            #     adapter_ensemble_model.parameters(), args.max_grad_norm
-            # )
-            # torch.nn.utils.clip_grad_norm_(rnn_model.parameters(), args.max_grad_norm)
+            if args.max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    adapter_ensemble_model.parameters(), args.max_grad_norm
+                )
+                torch.nn.utils.clip_grad_norm_(
+                    rnn_model.parameters(), args.max_grad_norm
+                )
 
             rnn_tr_loss += rnn_loss.item()
             rnn_epoch_loss += rnn_loss.item()
@@ -856,7 +786,6 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
                 optimizer.step()
                 scheduler.step()  # Update learning rate schedule
 
-                # pretrained_finbert_model.zero_grad()
                 adapter_ensemble_model.zero_grad()
                 rnn_model.zero_grad()
                 global_step += 1
@@ -991,9 +920,9 @@ def evaluate(args, eval_dataset, model, curr_alpha, prefix=""):
             ):
                 # Check if all paragraphs are processed
                 if (
-                    torch.count_nonzero(input_ids) == 0
-                    and torch.count_nonzero(input_masks) == 0
-                    and torch.count_nonzero(segment_ids) == 0
+                    np.count_nonzero(input_ids) == 0
+                    and np.count_nonzero(input_masks) == 0
+                    and np.count_nonzero(segment_ids) == 0
                 ):
                     break
 
@@ -1174,7 +1103,7 @@ def main():
     )
     parser.add_argument(
         "--rnn_hidden_size",
-        default=768,
+        default=256,
         type=int,
         help="Hidden size for RNN.",
     )
@@ -1231,28 +1160,25 @@ def main():
         help="the pretrained sec adapter model",
     )
     parser.add_argument(
+        "--is_adversarial",
+        action="store_true",
+        help="Are we training on adversarial",
+    )
+    parser.add_argument(
         "--is_adapter",
-        default=False,
-        type=bool,
+        action="store_true",
         help="Are we using the adapter",
     )
     parser.add_argument(
-        "--is_adversarial",
-        default=False,
-        type=bool,
-        help="Are we training on adversarial",
-    )
-    # parser.add_argument(
-    #     "--alpha",
-    #     default="",
-    #     type=float,
-    #     help="What is the rate by which alpha is going to change when loss is integrated",
-    # )
-    parser.add_argument(
         "--is_kpi_loss",
-        default=False,
-        type=bool,
+        action="store_true",
         help="Are we intergrating kpi loss",
+    )
+
+    parser.add_argument(
+        "--grouped_params",
+        action="store_true",
+        help="Are we using grouped params for ensemble and rnn",
     )
 
     ## Other parameters
@@ -1395,7 +1321,7 @@ def main():
     parser.add_argument(
         "--save_epoch_steps",
         type=int,
-        default=1,
+        default=-1,
         help="Save checkpoint every X epochs steps.",
     )
     parser.add_argument(
@@ -1441,7 +1367,7 @@ def main():
     parser.add_argument(
         "--max_save_checkpoints",
         type=int,
-        default=3,
+        default=1,
         help="The max amounts of checkpoint saving. Bigger than it will delete the former checkpoints",
     )
 
@@ -1465,7 +1391,7 @@ def main():
 
     for data_dir in args.data_dirs.split(","):
         args.data_dir = data_dir
-        name_prefix = f"{list(filter(None, args.finbert_path.split('/'))).pop()}_{args.percentage_change_type}_kfold-{args.data_dir.split('_')[-1]}_max_seq-{args.max_seq_length}_rnn_num_layers-{args.rnn_num_layers}_rnn_hidden_size-{args.rnn_hidden_size}_batch-{args.train_batch_size}_lr-{args.learning_rate}_warmup-{args.warmup_steps}_epoch-{args.num_train_epochs}_adapter-{args.is_adapter}_kpiLoss-{args.is_kpi_loss}_adversarial-{args.is_adversarial}_comment-{args.comment}"
+        name_prefix = f"{list(filter(None, args.finbert_path.split('/'))).pop()}_{args.percentage_change_type}_kfold-{args.data_dir.split('_')[-1]}_max_seq-{args.max_seq_length}_batch-{args.train_batch_size}_lr-{args.learning_rate}_warmup-{args.warmup_steps}_epoch-{args.num_train_epochs}_adapter-{args.is_adapter}_kpiLoss-{args.is_kpi_loss}_adversarial-{args.is_adversarial}_max_grad_norm-{args.max_grad_norm}_grouped_params-{args.grouped_params}_{args.type_text}_comment-{args.comment}"
         args.my_model_name = args.task_name + "_" + name_prefix
         if args.output_dir != "./output":
             args.output_dir = "./output"

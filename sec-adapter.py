@@ -217,7 +217,7 @@ class AdapterEnsembleModel(nn.Module):
     ):
 
         outputs = pretrained_model_outputs
-        sequence_output = outputs[0]  # 12-th hidden layer
+        sequence_output = outputs[0]  # 12-th hidden layer (11th index)
         # pooler_output = outputs[1]
         hidden_states = outputs[2]  # all hidden layers so we can take 0,5,11 later
         num = len(hidden_states)
@@ -723,7 +723,7 @@ def main():
     )
     parser.add_argument(
         "--adapter_list",
-        default="0,5,10",
+        default="0,5,11",
         type=str,
         help="The layer where add an adapter",
     )

@@ -184,7 +184,7 @@ class PretrainedModel(nn.Module):
         )
         self.config = self.model.config
         self.config.freeze_adapter = args.freeze_adapter
-        if args.freeze_bert:
+        if not args.grouped_params:
             for p in self.parameters():
                 p.requires_grad = False
 
@@ -553,6 +553,14 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
     # Use these grouped parameters only if we want to touch the BERT weights as well
     if args.grouped_params:
         optimizer_grouped_parameters = [
+            {
+                "params": [
+                    p
+                    for n, p in pretrained_finbert_model.named_parameters()
+                    if not any(nd in n for nd in no_decay)
+                ],
+                "weight_decay": 0.0,
+            },
             # Adapter Ensemble Bert model parameters
             {
                 "params": [
@@ -671,7 +679,9 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
         rnn_epoch_loss = 0
         overall_epoch_loss = 0
         for step, batch in enumerate(epoch_iterator):
-            adapter_ensemble_model.train()
+            if args.grouped_params:
+                pretrained_finbert_model.train()
+                adapter_ensemble_model.train()
             rnn_model.train()
 
             curr_batch_input_ids = defaultdict(list)
@@ -769,9 +779,13 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
 
             """Clipping gradients"""
             if args.max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    adapter_ensemble_model.parameters(), args.max_grad_norm
-                )
+                if args.grouped_params:
+                    torch.nn.utils.clip_grad_norm_(
+                        pretrained_finbert_model.parameters(), args.max_grad_norm
+                    )
+                    torch.nn.utils.clip_grad_norm_(
+                        adapter_ensemble_model.parameters(), args.max_grad_norm
+                    )
                 torch.nn.utils.clip_grad_norm_(
                     rnn_model.parameters(), args.max_grad_norm
                 )
@@ -786,6 +800,7 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
                 optimizer.step()
                 scheduler.step()  # Update learning rate schedule
 
+                pretrained_finbert_model.zero_grad()
                 adapter_ensemble_model.zero_grad()
                 rnn_model.zero_grad()
                 global_step += 1
@@ -891,6 +906,7 @@ def evaluate(args, eval_dataset, model, curr_alpha, prefix=""):
     nb_eval_steps = 0
 
     for batch in tqdm(eval_dataloader, desc="Evaluating"):
+        pretrained_finbert_model.eval()
         adapter_ensemble_model.eval()
         rnn_model.eval()
 
@@ -1084,12 +1100,6 @@ def main():
         help="The percentage change type for the label. Can be: percentage_change, percentage_change_standard, percentage_change_min_max",
     )
     parser.add_argument(
-        "--freeze_bert",
-        default=True,
-        type=bool,
-        help="freeze the parameters of pretrained model.",
-    )
-    parser.add_argument(
         "--freeze_adapter",
         default=True,
         type=bool,
@@ -1178,7 +1188,7 @@ def main():
     parser.add_argument(
         "--grouped_params",
         action="store_true",
-        help="Are we using grouped params for ensemble and rnn",
+        help="Are we using grouped params for finbert, ensemble and rnn",
     )
 
     ## Other parameters

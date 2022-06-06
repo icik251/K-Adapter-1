@@ -75,6 +75,7 @@ class RNNModel(nn.Module):
         self.lstm = nn.LSTM(
             self.input_size, self.hidden_size, self.num_layers, batch_first=True
         )
+        # Some experiments can be done with this
         self.linear_layers = nn.Sequential(
             nn.ReLU(),
             nn.Linear(self.hidden_size, self.hidden_size),
@@ -207,6 +208,19 @@ class PretrainedModel(nn.Module):
         )
 
         return outputs  # (loss), logits, (hidden_states), (attentions)
+
+    def save_pretrained(self, save_directory):
+        assert os.path.isdir(
+            save_directory
+        ), "Saving path should be a directory where the model and configuration can be saved"
+        # Only save the model it-self if we are using distributed training
+        model_to_save = self.module if hasattr(self, "module") else self
+        # Save configuration file
+        model_to_save.config.save_pretrained(save_directory)
+        # If we save using the predefined names, we can load using `from_pretrained`
+        output_model_file = os.path.join(save_directory, "finbert_pytorch_model.bin")
+        torch.save(model_to_save.state_dict(), output_model_file)
+        logger.info("Saving model checkpoint to %s", save_directory)
 
 
 class Adapter(nn.Module):

@@ -234,12 +234,38 @@ class SECProcessor(DataProcessor):
     ):
         """Creates examples for the training and dev sets."""
         examples = []
-        list_of_features_dicts = [
-            "fundamental_data_diff_self_t_1",
-            "fundamental_data_diff_self_t_2",
-            "fundamental_data_diff_industry_t",
-            "fundamental_data_diff_industry_t_1",
-            "fundamental_data_diff_industry_t_2",
+        dict_of_feautures_names = {
+            "fundamental_data_diff_self_t_1": "self_t_1",
+            "fundamental_data_diff_self_t_2": "self_t_2",
+            "fundamental_data_diff_industry_t": "ind_t",
+            "fundamental_data_diff_industry_t_1": "ind_t_1",
+            "fundamental_data_diff_industry_t_2": "ind_t_2",
+        }
+        kpis_names = list(list_of_dicts[0]["fundamental_data_diff_self_t_1"].keys())
+        list_of_kpi_features = [
+            "net_profit_margin_self_t_1",
+            "ev_revenue_self_t_1",
+            "roa_self_t_2",
+            "roce_self_t_2",
+            "operating_cash_flow_self_t_2",
+            "ev_revenue_self_t_2",
+            "roa_ind_t",
+            "debt_to_equity_ind_t",
+            "equity_ind_t",
+            "cash_ind_t",
+            "ev_ebit_ind_t",
+            "operating_profit_margin_ind_t_1",
+            "ev_revenue_ind_t_1",
+            "roa_ind_t_2",
+            "roce_ind_t_2",
+            "net_profit_margin_ind_t_2",
+            "debt_to_equity_ind_t_2",
+            "times_interest_earned_ind_t_2",
+            "price_to_earnings_ind_t_2",
+            "ev_ebitda_ind_t_2",
+            "ev_ebit_ind_t_2",
+            "ev_revenue_ind_t_2",
+            "filing_on_time_1",
         ]
         for (i, curr_dict_input) in enumerate(list_of_dicts):
             if type_text not in curr_dict_input.keys():
@@ -257,14 +283,18 @@ class SECProcessor(DataProcessor):
 
             # Logic for creating KPI and InputExampleParagraphs
             list_of_curr_features = []
-            for item in list_of_features_dicts:
-                list_of_curr_features += list(curr_dict_input[item].values())
+                
+            for feature in dict_of_feautures_names.keys():
+                for kpi_name in kpis_names:
+                    if kpi_name + '_' + dict_of_feautures_names[feature] in list_of_kpi_features:
+                        list_of_curr_features.append(curr_dict_input[feature][kpi_name])
+                
             if curr_dict_input["is_filing_on_time"]:
                 list_of_curr_features += [0, 1]
             else:
                 list_of_curr_features += [1, 0]
 
-            assert len(list_of_curr_features) == 97
+            assert len(list_of_curr_features) == len(list_of_kpi_features) + 1
 
             list_input_examples_paragraphs = []
             for item_text in list_of_texts_for_filing:

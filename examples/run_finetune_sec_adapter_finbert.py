@@ -76,16 +76,49 @@ class RNNModel(nn.Module):
             self.input_size, self.hidden_size, self.num_layers, batch_first=True
         )
         # Some experiments can be done with this
-        self.linear_layers = nn.Sequential(
-            nn.ReLU(),
-            nn.Linear(self.hidden_size, self.hidden_size),
-            nn.Dropout(args.rnn_dropout_prob),
-            nn.ReLU(),
-            nn.Linear(self.hidden_size, 64),
-            nn.Dropout(args.rnn_dropout_prob),
-            nn.ReLU(),
-            nn.Linear(64, self.num_classes),
-        )
+        if args.comment == "RNN_architect_1":
+            self.linear_layers = nn.Sequential(
+                nn.ReLU(),
+                nn.Linear(256, 128),
+                nn.Dropout(args.rnn_dropout_prob),
+                nn.ReLU(),
+                nn.Linear(128, self.num_classes),
+            )
+        elif args.comment == "RNN_architect_2":
+            self.linear_layers = nn.Sequential(
+                nn.ReLU(),
+                nn.Linear(512, 256),
+                nn.Dropout(0.2),
+                nn.ReLU(),
+                nn.Linear(256, self.num_classes),
+            )
+        elif args.comment == "RNN_architect_3":
+            self.linear_layers = nn.Sequential(
+                nn.ReLU(),
+                nn.Linear(512, 256),
+                nn.Dropout(0.5),
+                nn.ReLU(),
+                nn.Linear(256, self.num_classes),
+            )
+        elif args.comment == "RNN_architect_4":
+            self.linear_layers = nn.Sequential(
+                nn.ReLU(),
+                nn.Linear(256, 128),
+                nn.Dropout(0.5),
+                nn.ReLU(),
+                nn.Linear(128, self.num_classes),
+            )
+        else:
+            self.linear_layers = nn.Sequential(
+                nn.ReLU(),
+                nn.Linear(self.hidden_size, self.hidden_size),
+                nn.Dropout(args.rnn_dropout_prob),
+                nn.ReLU(),
+                nn.Linear(self.hidden_size, 64),
+                nn.Dropout(args.rnn_dropout_prob),
+                nn.ReLU(),
+                nn.Linear(64, self.num_classes),
+            )
 
     def forward(self, x):
         # Set initial hidden and cell states
@@ -167,13 +200,13 @@ class KPIModelXGBoost:
 
     def predict(self, X):
         # create dmatrix
-        dmatrix = DMatrix(pd.DataFrame(X, columns=self.model.feature_names))
+        dmatrix = DMatrix(pd.DataFrame(X.detach().cpu().numpy(), columns=self.model.feature_names))
         return self.model.predict(dmatrix)
 
     def get_mse_loss(self, X, y):
         preds = self.predict(X)
         # Implement loss
-        mse_loss = mean_squared_error(y.cpu(), preds)
+        mse_loss = mean_squared_error(y.detach().cpu(), preds)
         return mse_loss
 
 
@@ -1167,7 +1200,7 @@ def main():
     )
     parser.add_argument(
         "--adapter_list",
-        default="0,5,10",
+        default="0,5,11",
         type=str,
         help="The layer where add an adapter",
     )

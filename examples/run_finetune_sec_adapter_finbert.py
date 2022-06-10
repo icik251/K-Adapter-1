@@ -868,9 +868,9 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
         for key, value in results.items():
             tb_writer.add_scalar("eval_{}".format(key), value, epoch_step)
         if (
-            args.local_rank in [-1, 0]
+            (args.local_rank in [-1, 0]
             and args.save_epoch_steps > 0
-            and epoch_step % args.save_epoch_steps == 0
+            and epoch_step % args.save_epoch_steps == 0) or args.final_epoch == epoch_step
         ):
             # Save model checkpoint
             output_dir = os.path.join(
@@ -914,7 +914,7 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
                 except OSError as e:
                     print(e)
 
-        if args.max_steps > 0 and global_step > args.max_steps:
+        if (args.max_steps > 0 and global_step > args.max_steps) or args.final_epoch == epoch_step:
             epoch_iterator.close()
             break
 
@@ -1236,6 +1236,12 @@ def main():
         "--grouped_params",
         action="store_true",
         help="Are we using grouped params for finbert, ensemble and rnn",
+    )
+    
+    parser.add_argument(
+        "--final_epoch",
+        type=int,
+        help="The final epoch after which the final model will be saved and training is stopped.",
     )
 
     ## Other parameters

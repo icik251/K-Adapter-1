@@ -200,7 +200,9 @@ class KPIModelXGBoost:
 
     def predict(self, X):
         # create dmatrix
-        dmatrix = DMatrix(pd.DataFrame(X.detach().cpu().numpy(), columns=self.model.feature_names))
+        dmatrix = DMatrix(
+            pd.DataFrame(X.detach().cpu().numpy(), columns=self.model.feature_names)
+        )
         return self.model.predict(dmatrix)
 
     def get_mse_loss(self, X, y):
@@ -854,7 +856,6 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
 
         # Epoch ended
         # Log metrics training
-        curr_alpha = 0
         tb_writer.add_scalar("lr", scheduler.get_lr()[0], epoch_step)
         tb_writer.add_scalar("rnn_tr_loss", rnn_epoch_loss / step, epoch_step)
         if args.is_kpi_loss:
@@ -1027,7 +1028,6 @@ def evaluate(args, eval_dataset, model, curr_alpha, prefix=""):
 
         if args.is_kpi_loss:
             tmp_kpi_mse_loss = kpi_model.get_mse_loss(batch[1], curr_batch_labels)
-            # Change to gradually decrease
             tmp_overall_loss = custom_loss(
                 tmp_eval_rnn_loss, tmp_kpi_mse_loss, curr_alpha
             )

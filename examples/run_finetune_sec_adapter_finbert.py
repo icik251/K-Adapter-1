@@ -498,11 +498,11 @@ def load_and_cache_examples(args, task, tokenizer, dataset_type, evaluate=False)
         logger.info("Creating features from dataset file at %s", args.data_dir)
         examples = (
             processor.get_dev_examples(
-                args.data_dir, args.percentage_change_type, args.type_text, dataset_type
+                args.data_dir, args.percentage_change_type, args.type_text, dataset_type, args.is_adversarial
             )
             if evaluate
             else processor.get_train_examples(
-                args.data_dir, args.percentage_change_type, args.type_text, dataset_type
+                args.data_dir, args.percentage_change_type, args.type_text, dataset_type, args.is_adversarial
             )
         )
         features = convert_examples_to_features_sec(

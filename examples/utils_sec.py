@@ -206,23 +206,25 @@ class SECProcessor(DataProcessor):
     """Processor for our SEC filings data"""
 
     def get_train_examples(
-        self, data_dir, percentage_change_type, type_text, dataset_type=None
+        self, data_dir, percentage_change_type, type_text, dataset_type=None, is_adversarial=False
     ):
         """See base class."""
         return self._create_examples(
             self._read_json(os.path.join(data_dir, "train.json")),
             percentage_change_type,
             type_text,
+            is_adversarial
         )
 
     def get_dev_examples(
-        self, data_dir, percentage_change_type, type_text, dataset_type
+        self, data_dir, percentage_change_type, type_text, dataset_type, is_adversarial=False
     ):
         """See base class."""
         return self._create_examples(
             self._read_json(os.path.join(data_dir, "{}.json".format(dataset_type))),
             percentage_change_type,
             type_text,
+            is_adversarial
         )
 
     def get_labels(self):
@@ -230,7 +232,11 @@ class SECProcessor(DataProcessor):
         return 0
 
     def _create_examples(
-        self, list_of_dicts, percentage_change_type, type_text="mda_paragraphs"
+        self,
+        list_of_dicts,
+        percentage_change_type,
+        type_text="mda_paragraphs",
+        is_adversarial=False,
     ):
         """Creates examples for the training and dev sets."""
         examples = []
@@ -281,14 +287,24 @@ class SECProcessor(DataProcessor):
                 print(f"Absolutely empty filing: {i} | {label}")
                 continue
 
+            # Add adversarial for each paragraph in the beggining of the paragraph
+            if is_adversarial and len(curr_dict_input["adversarial_samples"]) > 0:
+                list_of_texts_for_filing = [
+                    curr_dict_input["adversarial_samples"][0] + ". " + item
+                    for item in list_of_texts_for_filing
+                ]
+
             # Logic for creating KPI and InputExampleParagraphs
             list_of_curr_features = []
-                
+
             for feature in dict_of_feautures_names.keys():
                 for kpi_name in kpis_names:
-                    if kpi_name + '_' + dict_of_feautures_names[feature] in list_of_kpi_features:
+                    if (
+                        kpi_name + "_" + dict_of_feautures_names[feature]
+                        in list_of_kpi_features
+                    ):
                         list_of_curr_features.append(curr_dict_input[feature][kpi_name])
-                
+
             if curr_dict_input["is_filing_on_time"]:
                 list_of_curr_features += [0, 1]
             else:

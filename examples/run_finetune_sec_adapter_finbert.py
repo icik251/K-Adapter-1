@@ -60,8 +60,9 @@ def custom_loss(rnn_loss, kpi_loss, alpha):
 
 
 def get_curr_alpha(step, t_total):
-    return max(0.0, float(t_total - step) / float(max(1.0, t_total)))
-
+    return (t_total - step) / t_total
+    # return max(0.0, float(t_total - step) / float(max(1.0, t_total)))
+ 
 
 class RNNModel(nn.Module):
     def __init__(self, args):
@@ -498,11 +499,19 @@ def load_and_cache_examples(args, task, tokenizer, dataset_type, evaluate=False)
         logger.info("Creating features from dataset file at %s", args.data_dir)
         examples = (
             processor.get_dev_examples(
-                args.data_dir, args.percentage_change_type, args.type_text, dataset_type, args.is_adversarial
+                args.data_dir,
+                args.percentage_change_type,
+                args.type_text,
+                dataset_type,
+                args.is_adversarial,
             )
             if evaluate
             else processor.get_train_examples(
-                args.data_dir, args.percentage_change_type, args.type_text, dataset_type, args.is_adversarial
+                args.data_dir,
+                args.percentage_change_type,
+                args.type_text,
+                dataset_type,
+                args.is_adversarial,
             )
         )
         features = convert_examples_to_features_sec(
@@ -863,15 +872,18 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
             tb_writer.add_scalar(
                 "overall_tr_loss", overall_epoch_loss / step, epoch_step
             )
-        # Log metrics evaluation
-        results = evaluate(args, val_dataset, model, curr_alpha)
+            # Log metrics evaluation
+            results = evaluate(args, val_dataset, model, curr_alpha)
+        else:
+            results = evaluate(args, val_dataset, model, 0)
+
         for key, value in results.items():
             tb_writer.add_scalar("eval_{}".format(key), value, epoch_step)
         if (
-            (args.local_rank in [-1, 0]
+            args.local_rank in [-1, 0]
             and args.save_epoch_steps > 0
-            and epoch_step % args.save_epoch_steps == 0) or args.final_epoch == epoch_step
-        ):
+            and epoch_step % args.save_epoch_steps == 0
+        ) or args.final_epoch == epoch_step:
             # Save model checkpoint
             output_dir = os.path.join(
                 args.output_dir, "checkpoint-{}".format(epoch_step)
@@ -914,7 +926,9 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
                 except OSError as e:
                     print(e)
 
-        if (args.max_steps > 0 and global_step > args.max_steps) or args.final_epoch == epoch_step:
+        if (
+            args.max_steps > 0 and global_step > args.max_steps
+        ) or args.final_epoch == epoch_step:
             epoch_iterator.close()
             break
 
@@ -1237,7 +1251,7 @@ def main():
         action="store_true",
         help="Are we using grouped params for finbert, ensemble and rnn",
     )
-    
+
     parser.add_argument(
         "--final_epoch",
         type=int,
@@ -1384,7 +1398,7 @@ def main():
     parser.add_argument(
         "--save_epoch_steps",
         type=int,
-        default=-1,
+        default=1,
         help="Save checkpoint every X epochs steps.",
     )
     parser.add_argument(

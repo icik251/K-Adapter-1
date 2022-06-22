@@ -62,7 +62,7 @@ def custom_loss(rnn_loss, kpi_loss, alpha):
 def get_curr_alpha(step, t_total):
     return (t_total - step) / t_total
     # return max(0.0, float(t_total - step) / float(max(1.0, t_total)))
- 
+
 
 class RNNModel(nn.Module):
     def __init__(self, args):
@@ -866,11 +866,11 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
         # Epoch ended
         # Log metrics training
         tb_writer.add_scalar("lr", scheduler.get_lr()[0], epoch_step)
-        tb_writer.add_scalar("rnn_tr_loss", rnn_epoch_loss / step, epoch_step)
+        tb_writer.add_scalar("rnn_tr_loss", rnn_epoch_loss / (step + 1), epoch_step)
         if args.is_kpi_loss:
             tb_writer.add_scalar("alpha", curr_alpha, epoch_step)
             tb_writer.add_scalar(
-                "overall_tr_loss", overall_epoch_loss / step, epoch_step
+                "overall_tr_loss", overall_epoch_loss / (step + 1), epoch_step
             )
             # Log metrics evaluation
             results = evaluate(args, val_dataset, model, curr_alpha)

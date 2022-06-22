@@ -655,13 +655,16 @@ def evaluate(args, val_dataset, model):
             )
         )
 
-    micro_F1 = f1_score(y_true=gold_result, y_pred=prediction, average="micro")
-    macro_F1 = f1_score(y_true=gold_result, y_pred=prediction, average="macro")
+    # micro_F1 = f1_score(y_true=gold_result, y_pred=prediction, average="micro")
+    # macro_F1 = f1_score(y_true=gold_result, y_pred=prediction, average="macro")
+    f1 = f1_score(y_true=gold_result, y_pred=prediction)
 
-    logger.info("The micro_f1 on dev dataset: %f", micro_F1)
-    logger.info("The macro_f1 on dev dataset: %f", macro_F1)
-    results["micro_F1"] = micro_F1
-    results["macro_F1"] = macro_F1
+    # logger.info("The micro_f1 on dev dataset: %f", micro_F1)
+    # logger.info("The macro_f1 on dev dataset: %f", macro_F1)
+    logger.info("The f1 on dev dataset: %f", f1)
+    # results["micro_F1"] = micro_F1
+    # results["macro_F1"] = macro_F1
+    results["F1"] = f1
     results["loss"] = eval_loss
     output_eval_file = os.path.join(
         args.output_dir, args.my_model_name + "eval_results.txt"

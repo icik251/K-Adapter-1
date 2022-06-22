@@ -206,25 +206,35 @@ class SECProcessor(DataProcessor):
     """Processor for our SEC filings data"""
 
     def get_train_examples(
-        self, data_dir, percentage_change_type, type_text, dataset_type=None, is_adversarial=False
+        self,
+        data_dir,
+        percentage_change_type,
+        type_text,
+        dataset_type=None,
+        is_adversarial=False,
     ):
         """See base class."""
         return self._create_examples(
             self._read_json(os.path.join(data_dir, "train.json")),
             percentage_change_type,
             type_text,
-            is_adversarial
+            is_adversarial,
         )
 
     def get_dev_examples(
-        self, data_dir, percentage_change_type, type_text, dataset_type, is_adversarial=False
+        self,
+        data_dir,
+        percentage_change_type,
+        type_text,
+        dataset_type,
+        is_adversarial=False,
     ):
         """See base class."""
         return self._create_examples(
             self._read_json(os.path.join(data_dir, "{}.json".format(dataset_type))),
             percentage_change_type,
             type_text,
-            is_adversarial
+            is_adversarial,
         )
 
     def get_labels(self):
@@ -325,8 +335,8 @@ class SECProcessor(DataProcessor):
                 )
             )
             # For testing
-            if len(examples) >= 300:
-                break
+            # if len(examples) >= 300:
+            #     break
 
         return examples
 
